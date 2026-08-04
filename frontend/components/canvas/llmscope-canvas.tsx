@@ -16,13 +16,12 @@ import {
   type NodeMouseHandler,
   type ReactFlowInstance,
 } from "@xyflow/react";
-import { Bot, LoaderCircle, Orbit, Play, RefreshCcw, ScanSearch, Sparkles } from "lucide-react";
+import { LoaderCircle, Orbit, Play, RefreshCcw, Sparkles } from "lucide-react";
 
 import { ProbabilityEdge } from "@/components/canvas/probability-edge";
 import { TokenContextMenu } from "@/components/canvas/token-context-menu";
 import { TokenNode } from "@/components/canvas/token-node";
 import type {
-  CanvasTab,
   ProbabilityFlowEdge,
   TokenFlowNode,
   TokenNodeData,
@@ -79,11 +78,11 @@ const FALLBACK_MODEL_CATALOG: ModelCatalogResponse = {
 const INITIAL_PROMPT = "What is a good time for a 16 year old kid in the 400m?";
 const INITIAL_TEMPERATURE = 0.7;
 const INITIAL_MAX_TOKENS = 256;
-const HORIZONTAL_GAP = 340;
-const VERTICAL_GAP = 190;
-const X_COLLISION_THRESHOLD = 240;
-const Y_COLLISION_THRESHOLD = 150;
-const MAX_BRANCH_CHILDREN = 5;
+const HORIZONTAL_GAP = 320;
+const VERTICAL_GAP = 168;
+const X_COLLISION_THRESHOLD = 220;
+const Y_COLLISION_THRESHOLD = 142;
+const MAX_BRANCH_CHILDREN = 4;
 
 type BackendState = "checking" | "online" | "offline";
 
@@ -94,6 +93,13 @@ interface ContextMenuState {
   title: string;
   x: number;
   y: number;
+}
+
+interface ReasoningBundle {
+  focusTerms: string[];
+  intent: string;
+  notes: string;
+  strategy: string;
 }
 
 const nodeTypes = {
@@ -114,12 +120,12 @@ function formatPercent(value: number) {
   return `${Math.round(value * 100)}%`;
 }
 
-function formatCompact(value: number) {
-  if (value >= 1000) {
-    return `${(value / 1000).toFixed(1)}k`;
-  }
+function formatProbability(value: number) {
+  return value.toFixed(4);
+}
 
-  return `${value}`;
+function formatNumber(value: number) {
+  return value.toFixed(4);
 }
 
 function joinTokenText(tokens: string[]) {
@@ -203,10 +209,20 @@ function getNodePosition(node: TokenFlowNode) {
   return node.position;
 }
 
+function reasoningBundleFromGeneration(payload?: GenerationResponse | null): ReasoningBundle {
+  return {
+    notes: payload?.notes ?? "",
+    intent: payload?.insights.detected_intent ?? "",
+    strategy: payload?.insights.response_strategy ?? "",
+    focusTerms: payload?.insights.focus_terms ?? [],
+  };
+}
+
 function buildPromptNode({
   prompt,
   model,
   preset,
+  reasoning,
   responseMode,
   status,
   temperature,
@@ -215,6 +231,7 @@ function buildPromptNode({
   model: string;
   preset: string;
   prompt: string;
+  reasoning: ReasoningBundle;
   responseMode: string;
   status: TokenNodeData["status"];
   temperature: number;
@@ -230,12 +247,12 @@ function buildPromptNode({
     data: {
       kind: "prompt",
       tokenText: prompt,
-      displayText: prompt,
       probability: 1,
       logProbability: 0,
       entropy: 0,
       latency: 0,
       tokenId: 0,
+      tokenizerId: 0,
       textPreview: prompt,
       cumulativeProbability: 1,
       depth: 0,
@@ -252,12 +269,19 @@ function buildPromptNode({
       requestTemperature: temperature,
       requestVariation: variation,
       responseMode,
+      sourceNotes: reasoning.notes,
+      reasoningIntent: reasoning.intent,
+      reasoningStrategy: reasoning.strategy,
+      reasoningFocusTerms: reasoning.focusTerms,
+      branchRationale: null,
+      rawLogits: null,
     },
     draggable: true,
   };
 }
 
 function buildTokenNode({
+  branchRationale,
   cumulativeProbability,
   depth,
   entropy,
@@ -272,6 +296,8 @@ function buildTokenNode({
   probability,
   prompt,
   rank,
+  rawLogits,
+  reasoning,
   responseMode,
   status,
   temperature,
@@ -280,6 +306,7 @@ function buildTokenNode({
   tokenId,
   variation,
 }: {
+  branchRationale: string | null;
   cumulativeProbability: number;
   depth: number;
   entropy: number;
@@ -294,6 +321,8 @@ function buildTokenNode({
   probability: number;
   prompt: string;
   rank: number;
+  rawLogits: number[] | null;
+  reasoning: ReasoningBundle;
   responseMode: string;
   status: TokenNodeData["status"];
   temperature: number;
@@ -309,12 +338,12 @@ function buildTokenNode({
     data: {
       kind: "token",
       tokenText: token,
-      displayText: token,
       probability,
       logProbability,
       entropy,
       latency,
       tokenId,
+      tokenizerId: tokenId,
       textPreview,
       cumulativeProbability,
       depth,
@@ -331,6 +360,12 @@ function buildTokenNode({
       requestTemperature: temperature,
       requestVariation: variation,
       responseMode,
+      sourceNotes: reasoning.notes,
+      reasoningIntent: reasoning.intent,
+      reasoningStrategy: reasoning.strategy,
+      reasoningFocusTerms: reasoning.focusTerms,
+      branchRationale,
+      rawLogits,
     },
     draggable: true,
   };
@@ -451,6 +486,18 @@ function findAvailableY(
   return candidateY;
 }
 
+function getMiniMapColor(node: TokenFlowNode) {
+  if (node.data.kind === "prompt" || node.data.isMainPath) {
+    return "#38bdf8";
+  }
+
+  if (node.data.probability < 0.36) {
+    return "#8b5cf6";
+  }
+
+  return "#64748b";
+}
+
 function Workspace() {
   const [prompt, setPrompt] = useState(INITIAL_PROMPT);
   const [modelCatalog, setModelCatalog] = useState<ModelCatalogResponse>(
@@ -464,7 +511,6 @@ function Workspace() {
   const [edges, setEdges] = useState<ProbabilityFlowEdge[]>([]);
   const [generation, setGeneration] = useState<GenerationResponse | null>(null);
   const [backendState, setBackendState] = useState<BackendState>("checking");
-  const [activeTab, setActiveTab] = useState<CanvasTab>("prompt");
   const [typedCompletion, setTypedCompletion] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -487,12 +533,8 @@ function Workspace() {
   const models = modelCatalog.models;
   const presets = modelCatalog.presets;
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
-  const generatedModelOption = generation
-    ? findModelOption(models, generation.request.model)
-    : findModelOption(models, model);
-  const generatedPresetOption = generation
-    ? findPresetOption(presets, generation.request.preset)
-    : findPresetOption(presets, preset);
+  const generatedModelOption = findModelOption(models, generation?.request.model ?? model);
+  const generatedPresetOption = findPresetOption(presets, generation?.request.preset ?? preset);
 
   useEffect(() => {
     nodesRef.current = nodes;
@@ -663,7 +705,7 @@ function Workspace() {
 
     const position = getNodePosition(node);
 
-    void flowRef.current.setCenter(position.x + 120, position.y + 64, {
+    void flowRef.current.setCenter(position.x + 120, position.y + 44, {
       duration: 520,
       zoom: Math.max(viewport.zoom, 0.9),
     });
@@ -671,10 +713,12 @@ function Workspace() {
 
   async function playMainPath(payload: GenerationResponse) {
     const runId = ++animationRunRef.current;
+    const reasoning = reasoningBundleFromGeneration(payload);
     const rootNode = buildPromptNode({
       prompt: payload.prompt_used,
       model: payload.request.model,
       preset: payload.request.preset,
+      reasoning,
       responseMode: payload.mode,
       status: "ready",
       temperature: payload.request.temperature,
@@ -718,6 +762,9 @@ function Workspace() {
         textPreview: trace.text_preview,
         isMainPath: true,
         status: "idle",
+        reasoning,
+        branchRationale: null,
+        rawLogits: null,
       });
 
       replaceGraph(
@@ -728,15 +775,15 @@ function Workspace() {
         joinTokenText(payload.tokens.slice(0, index + 1).map((token) => token.token)),
       );
 
-      await wait(index < 4 ? 110 : index < 16 ? 70 : 38);
+      await wait(index < 4 ? 110 : index < 16 ? 72 : 40);
     }
 
     if (animationRunRef.current === runId) {
       setIsReplaying(false);
       window.setTimeout(() => {
         void flowRef.current?.fitView({
-          duration: 650,
-          padding: 0.16,
+          duration: 640,
+          padding: 0.18,
         });
       }, 40);
     }
@@ -795,6 +842,12 @@ function Workspace() {
         return;
       }
 
+      const reasoning: ReasoningBundle = {
+        notes: payload.notes || parentNode.data.sourceNotes,
+        intent: parentNode.data.reasoningIntent,
+        strategy: parentNode.data.reasoningStrategy,
+        focusTerms: parentNode.data.reasoningFocusTerms,
+      };
       const currentChildren = edgesRef.current
         .filter((edge) => edge.source === nodeId)
         .map((edge) => nodesRef.current.find((item) => item.id === edge.target))
@@ -827,17 +880,20 @@ function Workspace() {
               entropy: candidate.entropy,
               latency: candidate.latency_ms,
               tokenId: candidate.token_id,
+              tokenizerId: candidate.token_id,
               cumulativeProbability: candidate.cumulative_probability,
               rank: candidate.rank,
               isMainPath: matchingChild.data.isMainPath || candidate.rank === 1,
               responseMode: payload.mode,
+              sourceNotes: payload.notes || matchingChild.data.sourceNotes,
+              branchRationale: candidate.rationale ?? matchingChild.data.branchRationale,
             },
           };
         } else {
           const preferredY = parentPosition.y + branchOffset(candidate.rank) * VERTICAL_GAP;
           const targetY = findAvailableY(targetX, preferredY, nextNodes, new Set([nodeId]));
           const startPosition = {
-            x: parentPosition.x + 56,
+            x: parentPosition.x + 42,
             y: parentPosition.y,
           };
 
@@ -864,6 +920,9 @@ function Workspace() {
               textPreview: candidate.text_preview,
               isMainPath: candidate.rank === 1,
               status: "idle",
+              reasoning,
+              branchRationale: candidate.rationale ?? null,
+              rawLogits: null,
             }),
           );
           animatedTargets.push({
@@ -900,6 +959,8 @@ function Workspace() {
           distributionRequested: true,
           isCollapsed: false,
           status: "ready",
+          responseMode: payload.mode,
+          sourceNotes: payload.notes || nextNodes[parentIndex].data.sourceNotes,
         },
       };
 
@@ -953,6 +1014,12 @@ function Workspace() {
       prompt: trimmedPrompt,
       model,
       preset,
+      reasoning: {
+        notes: "",
+        intent: "",
+        strategy: "",
+        focusTerms: [],
+      },
       responseMode: "pending",
       status: "loading",
       temperature,
@@ -965,7 +1032,6 @@ function Workspace() {
     setErrorMessage(null);
     setIsGenerating(true);
     setRequestVariation(nextVariation);
-    setActiveTab("prompt");
 
     try {
       const response = await fetch("/api/generate", {
@@ -1002,6 +1068,12 @@ function Workspace() {
             prompt: trimmedPrompt,
             model,
             preset,
+            reasoning: {
+              notes: "",
+              intent: "",
+              strategy: "",
+              focusTerms: [],
+            },
             responseMode: "error",
             status: "idle",
             temperature,
@@ -1020,21 +1092,19 @@ function Workspace() {
       return;
     }
 
-    setActiveTab("replay");
     await playMainPath(generation);
   }
 
   function handleResetView() {
     void flowRef.current?.fitView({
       duration: 520,
-      padding: 0.16,
+      padding: 0.18,
     });
   }
 
   function handleNodeContextMenu(event: React.MouseEvent, node: TokenFlowNode) {
     event.preventDefault();
     setSelectedNodeId(node.id);
-    setActiveTab("graph");
     setContextMenu({
       nodeId: node.id,
       title: node.data.kind === "prompt" ? "Prompt" : node.data.tokenText,
@@ -1045,13 +1115,21 @@ function Workspace() {
     });
   }
 
-  const handleNodeClick: NodeMouseHandler<TokenFlowNode> = (_event, node) => {
+  const handleNodeClick: NodeMouseHandler<TokenFlowNode> = (event, node) => {
+    setContextMenu(null);
     setSelectedNodeId(node.id);
-    setActiveTab("graph");
 
-    if (node.data.isCollapsed || !node.data.distributionRequested) {
-      void expandNode(node.id);
+    if (event.shiftKey && node.data.childCount > 0) {
+      event.preventDefault();
+      toggleCollapsed(node.id, true);
     }
+  };
+
+  const handleNodeDoubleClick: NodeMouseHandler<TokenFlowNode> = (event, node) => {
+    event.preventDefault();
+    setContextMenu(null);
+    setSelectedNodeId(node.id);
+    void expandNode(node.id);
   };
 
   const currentStatus = isGenerating
@@ -1059,8 +1137,13 @@ function Workspace() {
     : isReplaying
       ? "Replaying"
       : selectedNode
-        ? "Inspecting"
+        ? "Exploring"
         : "Ready";
+  const currentPreview =
+    selectedNode?.data.textPreview ||
+    typedCompletion ||
+    generation?.completion ||
+    "Double-click any token to reveal what the model almost chose next.";
 
   return (
     <div className="llmscope-app">
@@ -1079,15 +1162,18 @@ function Workspace() {
 
       {errorMessage ? <div className="llmscope-error">{errorMessage}</div> : null}
 
-      <aside className="floating-panel floating-panel--left">
-        <div className="floating-panel__header">
+      <aside className="explorer-dock">
+        <div className="explorer-dock__header">
           <div>
-            <p className="floating-panel__eyebrow">LLMScope</p>
-            <h1 className="floating-panel__title">Canvas</h1>
+            <p className="explorer-dock__eyebrow">LLMScope</p>
+            <h1 className="explorer-dock__title">Explore the tree</h1>
+            <p className="explorer-dock__subtitle">
+              Double-click a token to reveal alternate futures.
+            </p>
           </div>
 
           <button
-            className="floating-icon-button"
+            className="icon-button"
             onClick={() => void refreshHealth()}
             type="button"
           >
@@ -1095,280 +1181,251 @@ function Workspace() {
           </button>
         </div>
 
-        <div className="dock-tabs">
-          {[
-            { id: "prompt", label: "Prompt", icon: Sparkles },
-            { id: "replay", label: "Replay", icon: Play },
-            { id: "graph", label: "Graph", icon: ScanSearch },
-          ].map((tab) => {
-            const Icon = tab.icon;
+        <textarea
+          aria-label="Prompt"
+          className="explorer-textarea"
+          onChange={(event) => {
+            setPrompt(event.target.value);
+            setErrorMessage(null);
+          }}
+          placeholder="Ask something"
+          value={prompt}
+        />
 
-            return (
-              <button
-                key={tab.id}
-                className={`dock-tab${activeTab === tab.id ? " dock-tab--active" : ""}`}
-                onClick={() => setActiveTab(tab.id as CanvasTab)}
-                type="button"
-              >
-                <Icon className="h-4 w-4" />
-                {tab.label}
-              </button>
-            );
-          })}
+        <div className="explorer-grid">
+          <select
+            aria-label="Model"
+            className="explorer-input"
+            disabled={isLoadingModels}
+            onChange={(event) => {
+              setModel(event.target.value);
+              setErrorMessage(null);
+            }}
+            value={model}
+          >
+            {models.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+
+          <select
+            aria-label="Mode"
+            className="explorer-input"
+            disabled={isLoadingModels}
+            onChange={(event) => {
+              setPreset(event.target.value);
+              setErrorMessage(null);
+            }}
+            value={preset}
+          >
+            {presets.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
         </div>
 
-        {activeTab === "prompt" ? (
-          <div className="floating-panel__content">
-            <textarea
-              aria-label="Prompt"
-              className="floating-textarea"
-              onChange={(event) => {
-                setPrompt(event.target.value);
-                setErrorMessage(null);
-              }}
-              placeholder="Ask something"
-              value={prompt}
-            />
+        <div className="explorer-grid explorer-grid--compact">
+          <input
+            aria-label="Temperature"
+            className="explorer-input"
+            max={2}
+            min={0}
+            onChange={(event) => setTemperature(Number(event.target.value))}
+            step={0.1}
+            type="number"
+            value={temperature}
+          />
 
-            <div className="floating-grid">
-              <select
-                aria-label="Model"
-                className="floating-input"
-                disabled={isLoadingModels}
-                onChange={(event) => {
-                  setModel(event.target.value);
-                  setErrorMessage(null);
-                }}
-                value={model}
-              >
-                {models.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-
-              <select
-                aria-label="Mode"
-                className="floating-input"
-                disabled={isLoadingModels}
-                onChange={(event) => {
-                  setPreset(event.target.value);
-                  setErrorMessage(null);
-                }}
-                value={preset}
-              >
-                {presets.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="floating-grid floating-grid--tight">
-              <label className="mini-field">
-                <span>Temp</span>
-                <input
-                  className="floating-input"
-                  max={2}
-                  min={0}
-                  onChange={(event) => setTemperature(Number(event.target.value))}
-                  step={0.1}
-                  type="number"
-                  value={temperature}
-                />
-              </label>
-
-              <label className="mini-field">
-                <span>Max</span>
-                <input
-                  className="floating-input"
-                  max={4096}
-                  min={1}
-                  onChange={(event) => setMaxTokens(Number(event.target.value))}
-                  type="number"
-                  value={maxTokens}
-                />
-              </label>
-            </div>
-
-            <button
-              className="floating-submit"
-              disabled={isGenerating || isLoadingModels}
-              onClick={() => void handleSubmit()}
-              type="button"
-            >
-              {isGenerating ? (
-                <>
-                  <LoaderCircle className="h-4 w-4 animate-spin" />
-                  Generating...
-                </>
-              ) : isLoadingModels ? (
-                <>
-                  <LoaderCircle className="h-4 w-4 animate-spin" />
-                  Loading...
-                </>
-              ) : (
-                <>
-                  <Sparkles className="h-4 w-4" />
-                  Generate
-                </>
-              )}
-            </button>
-
-            <div className="inline-stats">
-              <span className="inline-stats__chip">{generatedModelOption.label}</span>
-              <span className="inline-stats__chip">{generatedPresetOption.label}</span>
-              <span className="inline-stats__chip">
-                {backendState === "online" ? "Online" : backendState === "offline" ? "Offline" : "Checking"}
-              </span>
-            </div>
-
-            <div className="response-preview">
-              <div className="response-preview__label">
-                <Bot className="h-4 w-4" />
-                Live
-              </div>
-              <p className="response-preview__text">
-                {typedCompletion || " "}
-                {isGenerating || isReplaying ? (
-                  <span className="response-preview__caret" />
-                ) : null}
-              </p>
-            </div>
-          </div>
-        ) : null}
-
-        {activeTab === "replay" ? (
-          <div className="floating-panel__content">
-            <button
-              className="floating-submit floating-submit--secondary"
-              disabled={!generation || isGenerating}
-              onClick={() => void handleReplay()}
-              type="button"
-            >
-              <Play className="h-4 w-4" />
-              Replay path
-            </button>
-
-            <button
-              className="floating-submit floating-submit--ghost"
-              onClick={handleResetView}
-              type="button"
-            >
-              <Orbit className="h-4 w-4" />
-              Fit view
-            </button>
-
-            <div className="metric-stack">
-              <div className="metric-card">
-                <span>Tokens</span>
-                <strong>{generation?.tokens.length ?? 0}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Latency</span>
-                <strong>{generation ? `${generation.stats.latency_ms}ms` : "-"}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Mode</span>
-                <strong>{generation?.mode ?? "-"}</strong>
-              </div>
-            </div>
-          </div>
-        ) : null}
-
-        {activeTab === "graph" ? (
-          <div className="floating-panel__content">
-            <div className="metric-stack">
-              <div className="metric-card">
-                <span>Nodes</span>
-                <strong>{formatCompact(nodes.filter((node) => !node.hidden).length)}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Edges</span>
-                <strong>{formatCompact(edges.filter((edge) => !edge.hidden).length)}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Zoom</span>
-                <strong>{`${Math.round(viewport.zoom * 100)}%`}</strong>
-              </div>
-            </div>
-
-            <div className="legend-bar">
-              <span className="legend-bar__item legend-bar__item--high">High</span>
-              <span className="legend-bar__item legend-bar__item--mid">Mid</span>
-              <span className="legend-bar__item legend-bar__item--low">Low</span>
-            </div>
-
-            <p className="floating-note">
-              Click to expand. Right-click for branch actions. Drag nodes to tune layout.
-            </p>
-          </div>
-        ) : null}
-      </aside>
-
-      <aside className="floating-panel floating-panel--right">
-        <div className="floating-panel__header">
-          <div>
-            <p className="floating-panel__eyebrow">Inspect</p>
-            <h2 className="floating-panel__title floating-panel__title--small">
-              {selectedNode?.data.kind === "prompt"
-                ? "Prompt"
-                : selectedNode?.data.tokenText ?? "Node"}
-            </h2>
-          </div>
+          <input
+            aria-label="Max tokens"
+            className="explorer-input"
+            max={4096}
+            min={1}
+            onChange={(event) => setMaxTokens(Number(event.target.value))}
+            type="number"
+            value={maxTokens}
+          />
         </div>
 
-        <div className="floating-panel__content">
-          {selectedNode ? (
-            <>
-              <div className="inspect-card">
-                <p className="inspect-card__text">{selectedNode.data.textPreview}</p>
-              </div>
+        <div className="explorer-actions">
+          <button
+            className="explorer-button explorer-button--primary"
+            disabled={isGenerating || isLoadingModels}
+            onClick={() => void handleSubmit()}
+            type="button"
+          >
+            {isGenerating ? (
+              <>
+                <LoaderCircle className="h-4 w-4 animate-spin" />
+                Generating...
+              </>
+            ) : isLoadingModels ? (
+              <>
+                <LoaderCircle className="h-4 w-4 animate-spin" />
+                Loading...
+              </>
+            ) : (
+              <>
+                <Sparkles className="h-4 w-4" />
+                Generate
+              </>
+            )}
+          </button>
 
-              <div className="metric-stack metric-stack--two">
-                <div className="metric-card">
-                  <span>p</span>
-                  <strong>{formatPercent(selectedNode.data.probability)}</strong>
-                </div>
-                <div className="metric-card">
-                  <span>logP</span>
-                  <strong>{selectedNode.data.logProbability.toFixed(3)}</strong>
-                </div>
-                <div className="metric-card">
-                  <span>H</span>
-                  <strong>{selectedNode.data.entropy.toFixed(3)}</strong>
-                </div>
-                <div className="metric-card">
-                  <span>ms</span>
-                  <strong>{selectedNode.data.latency}</strong>
-                </div>
-                <div className="metric-card">
-                  <span>id</span>
-                  <strong>{selectedNode.data.tokenId}</strong>
-                </div>
-                <div className="metric-card">
-                  <span>path</span>
-                  <strong>{formatPercent(selectedNode.data.cumulativeProbability)}</strong>
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className="inspect-card">
-              <p className="inspect-card__text">Select a node.</p>
-            </div>
-          )}
+          <button
+            className="explorer-button explorer-button--ghost"
+            disabled={!generation || isGenerating}
+            onClick={() => void handleReplay()}
+            type="button"
+          >
+            <Play className="h-4 w-4" />
+            Replay
+          </button>
 
-          {generation ? (
-            <div className="session-strip">
-              <span>{generation.stats.provider}</span>
-              <span>{generation.stats.model}</span>
-              <span>{generation.stats.total_tokens}</span>
-            </div>
-          ) : null}
+          <button className="explorer-button explorer-button--ghost" onClick={handleResetView} type="button">
+            <Orbit className="h-4 w-4" />
+            Fit
+          </button>
+        </div>
+
+        <div className="explorer-chip-row">
+          <span className="explorer-chip">{generatedModelOption.label}</span>
+          <span className="explorer-chip">{generatedPresetOption.label}</span>
+          <span className="explorer-chip">
+            {backendState === "online"
+              ? "Online"
+              : backendState === "offline"
+                ? "Offline"
+                : "Checking"}
+          </span>
+        </div>
+
+        <div className="path-card">
+          <p className="path-card__label">Current path</p>
+          <p className="path-card__text">{currentPreview}</p>
         </div>
       </aside>
+
+      <aside className="inspector-panel">
+        <div className="inspector-panel__header">
+          <p className="inspector-panel__eyebrow">Inspector</p>
+          <h2 className="inspector-panel__title">
+            {selectedNode?.data.kind === "prompt"
+              ? "Prompt"
+              : selectedNode?.data.tokenText ?? "Select a node"}
+          </h2>
+        </div>
+
+        {selectedNode ? (
+          <div className="inspector-panel__content">
+            <div className="inspector-section">
+              <p className="inspector-section__label">Path</p>
+              <div className="inspector-block">
+                <p>{selectedNode.data.textPreview}</p>
+              </div>
+            </div>
+
+            <div className="inspector-section">
+              <p className="inspector-section__label">Metadata</p>
+              <dl className="inspector-grid-data">
+                <div>
+                  <dt>Token</dt>
+                  <dd>{selectedNode.data.tokenText}</dd>
+                </div>
+                <div>
+                  <dt>Probability</dt>
+                  <dd>{formatProbability(selectedNode.data.probability)}</dd>
+                </div>
+                <div>
+                  <dt>Log probability</dt>
+                  <dd>{formatNumber(selectedNode.data.logProbability)}</dd>
+                </div>
+                <div>
+                  <dt>Entropy</dt>
+                  <dd>{formatNumber(selectedNode.data.entropy)}</dd>
+                </div>
+                <div>
+                  <dt>Latency</dt>
+                  <dd>{`${selectedNode.data.latency} ms`}</dd>
+                </div>
+                <div>
+                  <dt>Token id</dt>
+                  <dd>{selectedNode.data.tokenId}</dd>
+                </div>
+                <div>
+                  <dt>Tokenizer id</dt>
+                  <dd>{selectedNode.data.tokenizerId}</dd>
+                </div>
+                <div>
+                  <dt>Cumulative probability</dt>
+                  <dd>{formatProbability(selectedNode.data.cumulativeProbability)}</dd>
+                </div>
+                <div>
+                  <dt>Model</dt>
+                  <dd>{selectedNode.data.requestModel}</dd>
+                </div>
+                <div>
+                  <dt>Mode</dt>
+                  <dd>{selectedNode.data.responseMode}</dd>
+                </div>
+              </dl>
+            </div>
+
+            <div className="inspector-section">
+              <p className="inspector-section__label">Reasoning metadata</p>
+              <div className="inspector-block inspector-block--stack">
+                <p>
+                  <strong>Intent</strong>
+                  <span>{selectedNode.data.reasoningIntent || "Unavailable"}</span>
+                </p>
+                <p>
+                  <strong>Strategy</strong>
+                  <span>{selectedNode.data.reasoningStrategy || "Unavailable"}</span>
+                </p>
+                <p>
+                  <strong>Focus terms</strong>
+                  <span>
+                    {selectedNode.data.reasoningFocusTerms.length > 0
+                      ? selectedNode.data.reasoningFocusTerms.join(", ")
+                      : "Unavailable"}
+                  </span>
+                </p>
+                <p>
+                  <strong>Branch rationale</strong>
+                  <span>{selectedNode.data.branchRationale ?? "Unavailable"}</span>
+                </p>
+                <p>
+                  <strong>Notes</strong>
+                  <span>{selectedNode.data.sourceNotes || "Unavailable"}</span>
+                </p>
+              </div>
+            </div>
+
+            <div className="inspector-section">
+              <p className="inspector-section__label">Raw logits</p>
+              <div className="inspector-block">
+                <p>
+                  {selectedNode.data.rawLogits && selectedNode.data.rawLogits.length > 0
+                    ? selectedNode.data.rawLogits.join(", ")
+                    : "Not exposed by the current backend."}
+                </p>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="inspector-empty">
+            Select a node, then inspect the branch here.
+          </div>
+        )}
+      </aside>
+
+      <div className="canvas-hint">
+        click to select • double-click to expand • shift+click to collapse • space to pan • scroll to zoom
+      </div>
 
       <ReactFlow<TokenFlowNode, ProbabilityFlowEdge>
         colorMode="dark"
@@ -1379,8 +1436,12 @@ function Workspace() {
         edgeTypes={edgeTypes}
         edges={edges}
         fitView
-        maxZoom={1.8}
-        minZoom={0.18}
+        fitViewOptions={{
+          padding: 0.18,
+        }}
+        maxZoom={1.9}
+        minZoom={0.16}
+        nodeClickDistance={8}
         nodeTypes={nodeTypes}
         nodes={nodes}
         onEdgesChange={(changes: EdgeChange<ProbabilityFlowEdge>[]) => {
@@ -1397,6 +1458,7 @@ function Workspace() {
         }}
         onNodeClick={handleNodeClick}
         onNodeContextMenu={handleNodeContextMenu}
+        onNodeDoubleClick={handleNodeDoubleClick}
         onNodeDragStop={(_event, node) => {
           updateGraph((currentNodes, currentEdges) => ({
             nodes: currentNodes.map((currentNode) =>
@@ -1419,29 +1481,19 @@ function Workspace() {
         onPaneClick={() => {
           setContextMenu(null);
         }}
-        panOnDrag
+        panActivationKeyCode="Space"
+        panOnDrag={false}
+        selectNodesOnDrag={false}
         selectionOnDrag={false}
+        zoomOnDoubleClick={false}
       >
-        <Background color="rgba(148, 163, 184, 0.18)" gap={28} size={1.1} variant={BackgroundVariant.Lines} />
-        <MiniMap<TokenFlowNode>
-          nodeColor={(node) => {
-            if (node.data.kind === "prompt") {
-              return "#c084fc";
-            }
-
-            if (node.data.probability >= 0.72) {
-              return "#38bdf8";
-            }
-
-            if (node.data.probability >= 0.45) {
-              return "#f59e0b";
-            }
-
-            return "#fb7185";
-          }}
-          pannable
-          zoomable
+        <Background
+          color="rgba(148, 163, 184, 0.15)"
+          gap={26}
+          size={1}
+          variant={BackgroundVariant.Lines}
         />
+        <MiniMap<TokenFlowNode> nodeColor={getMiniMapColor} pannable zoomable />
         <Controls showInteractive={false} />
       </ReactFlow>
 
