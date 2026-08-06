@@ -39,6 +39,9 @@ export interface CurrentRealityStats {
 
 interface CurrentRealityPanelProps {
   collapsed: boolean;
+  continuationModeLabel: string;
+  continuationModeTitle: string | null;
+  continuationModeTone: "exact" | "approximate";
   hasContent: boolean;
   probabilityMode: ProbabilityViewMode;
   remainingProbabilityMass: number;
@@ -398,6 +401,9 @@ function MarkdownPreview({ text }: { text: string }) {
 
 export const CurrentRealityPanel = memo(function CurrentRealityPanel({
   collapsed,
+  continuationModeLabel,
+  continuationModeTitle,
+  continuationModeTone,
   hasContent,
   probabilityMode,
   remainingProbabilityMass,
@@ -465,6 +471,12 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
           <div className="sentence-bar__header-topline">
             <p className="sentence-bar__eyebrow">Current reality</p>
             <div className="sentence-bar__badges">
+              <span
+                className={`sentence-bar__badge sentence-bar__badge--${continuationModeTone}`}
+                title={continuationModeTitle ?? undefined}
+              >
+                {`Mode: ${continuationModeLabel}`}
+              </span>
               <span className="sentence-bar__badge">{modeLabel}</span>
               <span className="sentence-bar__badge">{stats.tokenCount} tokens</span>
               <span className="sentence-bar__badge">{formatPercent(stats.displayProbability)}</span>

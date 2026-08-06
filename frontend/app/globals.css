@@ -1787,6 +1787,18 @@ button {
   white-space: nowrap;
 }
 
+.llmscope-app .sentence-bar__badge--exact,
+.llmscope-app .inspector-inline-badge--exact {
+  background: rgba(52, 211, 153, 0.12);
+  color: #9ae6b4;
+}
+
+.llmscope-app .sentence-bar__badge--approximate,
+.llmscope-app .inspector-inline-badge--approximate {
+  background: rgba(251, 191, 36, 0.14);
+  color: #fcd34d;
+}
+
 .llmscope-app .sentence-bar__eyebrow,
 .llmscope-app .explorer-dock__eyebrow,
 .llmscope-app .inspector-panel__eyebrow,

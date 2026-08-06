@@ -16,12 +16,15 @@ from app.core.errors import LLMScopeError
 from app.models.provider import ModelProvider
 from app.schemas.generation import (
     AlternativeCandidate,
+    ContinueGenerationRequest,
+    ContinueGenerationResponse,
     GenerationRequest,
     GenerationResponse,
     GenerationStats,
     NodeExpansionCandidate,
     NodeExpansionRequest,
     NodeExpansionResponse,
+    ProviderCapabilitiesDetail,
     PromptInsights,
     RequestEcho,
     TokenTrace,
@@ -104,6 +107,13 @@ PRESET_INSTRUCTIONS = {
     "coach": "Use a supportive tone and give the user a usable benchmark, next step, or adjustment.",
 }
 
+CONTINUATION_TONE_HINTS = {
+    "general": "Match the concise, practical tone already established by the assistant prefix.",
+    "reasoning": "Match the compact reasoning style already established by the assistant prefix.",
+    "coding": "Match the technical wording and implementation-focused style already established by the assistant prefix.",
+    "coach": "Match the supportive coaching tone already established by the assistant prefix.",
+}
+
 RESPONSE_STYLE_HINTS = [
     "Lead with the answer, then add one short supporting sentence.",
     "Use a slightly different phrasing pattern from the last attempt and avoid canned wording.",
@@ -159,10 +169,36 @@ class ContinuationContext:
     token_count: int
 
 
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    supports_assistant_prefill: bool
+    supports_token_logprobs: bool
+    minimum_output_tokens: int
+
+
+@dataclass
+class GenerationSegment:
+    segment_id: str
+    source_node_id: str
+    request_prompt: str
+    context_prefix: str
+    model: str
+    preset: str
+    temperature: float
+    top_p: float
+    variation: int
+    demo_mode: bool
+    mode: str
+    tokens: list[TokenTrace]
+    revealed_count: int = 0
+    finish_reason: str | None = None
+
+
 class GenerationService:
     def __init__(self) -> None:
         self._settings = get_settings()
         self._client: OpenAI | None = None
+        self._segments_by_id: dict[str, GenerationSegment] = {}
 
     def list_models(self) -> ModelCatalogResponse:
         return ModelCatalogResponse(
@@ -265,6 +301,7 @@ class GenerationService:
         preset = request.preset if request.preset in PRESET_OPTION_MAP else "general"
         assistant_prefix = context.assistant_prefix
         intent, _ = self._detect_intent(prompt.lower())
+        capabilities = self._provider_capabilities_for_model(request.model)
 
         if self._settings.app_env.lower() == "development":
             logger.debug(
@@ -286,17 +323,29 @@ class GenerationService:
             )
             notes = "Demo data. Token alternatives are synthetic because Demo Mode is enabled."
         else:
-            steps, _, latency_ms = self._request_live_steps(
-                request=request,
-                prompt=prompt,
-                preset=preset,
-                intent=intent,
-                assistant_prefix=assistant_prefix,
-                branch_id=request.parent_node_id,
-                parent_node_id=request.parent_node_id,
-                max_output_tokens=1,
-                top_logprobs=request.max_children,
-            )
+            continuation_mode = "native_prefill" if capabilities.supports_assistant_prefill else "approximate"
+            if capabilities.supports_assistant_prefill:
+                steps, _, latency_ms = self._request_live_steps(
+                    request=request,
+                    prompt=prompt,
+                    preset=preset,
+                    intent=intent,
+                    assistant_prefix=assistant_prefix,
+                    branch_id=request.parent_node_id,
+                    parent_node_id=request.parent_node_id,
+                    max_output_tokens=1,
+                    top_logprobs=request.max_children,
+                )
+            else:
+                steps, _, latency_ms = self._request_approximate_steps(
+                    request=request,
+                    prompt=prompt,
+                    assistant_prefix=assistant_prefix,
+                    branch_id=request.parent_node_id,
+                    parent_node_id=request.parent_node_id,
+                    max_output_tokens=1,
+                    top_logprobs=request.max_children,
+                )
             if not steps:
                 self._raise_logprobs_unavailable()
 
@@ -306,6 +355,11 @@ class GenerationService:
                 request=request,
                 trace=source_trace,
                 latency_ms=latency_value,
+            )
+            children = self._apply_continuation_metadata(
+                children=children,
+                capabilities=capabilities,
+                continuation_mode=continuation_mode,
             )
             if self._settings.app_env.lower() == "development":
                 logger.debug(
@@ -327,7 +381,11 @@ class GenerationService:
                 )
             entropy = source_trace.entropy
             response_mode = "live"
-            notes = "Next-token distribution returned by the provider for this exact branch context."
+            notes = (
+                "Approximate next-token distribution regenerated from the selected branch context."
+                if continuation_mode == "approximate"
+                else "Next-token distribution returned by the provider for this exact branch context."
+            )
 
         return NodeExpansionResponse(
             mode=response_mode,
@@ -336,6 +394,38 @@ class GenerationService:
             entropy=entropy,
             expanded_at=datetime.now(timezone.utc),
             notes=notes,
+        )
+
+    def continue_node(self, request: ContinueGenerationRequest) -> ContinueGenerationResponse:
+        context = self._build_continuation_context(request)
+        capabilities = self._provider_capabilities_for_model(request.model)
+        cached_segment = (
+            self._segments_by_id.get(request.cached_segment_id)
+            if request.cached_segment_id
+            else None
+        )
+
+        if cached_segment and request.cached_token_index is not None:
+            if request.cached_token_index < len(cached_segment.tokens):
+                return self._reveal_next_cached_token(
+                    request=request,
+                    context=context,
+                    capabilities=capabilities,
+                    segment=cached_segment,
+                    token_index=request.cached_token_index,
+                )
+
+        if capabilities.supports_assistant_prefill:
+            return self._generate_native_prefill_segment(
+                request=request,
+                context=context,
+                capabilities=capabilities,
+            )
+
+        return self._generate_approximate_segment(
+            request=request,
+            context=context,
+            capabilities=capabilities,
         )
 
     def _build_live_generation(
@@ -360,6 +450,496 @@ class GenerationService:
 
         completion = "".join(step.token for step in steps)
         return completion, "live", usage, latency_ms, steps
+
+    def _provider_capabilities_for_model(self, model: str) -> ProviderCapabilities:
+        provider = MODEL_OPTION_MAP.get(
+            model,
+            ModelOption(
+                id=model,
+                label=model,
+                provider=ModelProvider.OPENAI,
+                group="Custom",
+            ),
+        ).provider
+
+        if provider == ModelProvider.OPENAI:
+            return ProviderCapabilities(
+                supports_assistant_prefill=False,
+                supports_token_logprobs=True,
+                minimum_output_tokens=16,
+            )
+
+        return ProviderCapabilities(
+            supports_assistant_prefill=False,
+            supports_token_logprobs=True,
+            minimum_output_tokens=1,
+        )
+
+    def _serialize_provider_capabilities(
+        self,
+        capabilities: ProviderCapabilities,
+    ) -> ProviderCapabilitiesDetail:
+        return ProviderCapabilitiesDetail(
+            supports_assistant_prefill=capabilities.supports_assistant_prefill,
+            supports_token_logprobs=capabilities.supports_token_logprobs,
+            minimum_output_tokens=capabilities.minimum_output_tokens,
+        )
+
+    def _make_segment_id(self, *, source_node_id: str, assistant_prefix: str, model: str) -> str:
+        checksum = zlib.adler32(f"{model}:{source_node_id}:{assistant_prefix}".encode("utf-8"))
+        return f"segment:{source_node_id}:{checksum:08x}"
+
+    def _store_generation_segment(
+        self,
+        *,
+        request: ContinueGenerationRequest,
+        context: ContinuationContext,
+        steps: list[TokenTrace],
+        revealed_count: int,
+        mode: str,
+    ) -> GenerationSegment:
+        segment_id = self._make_segment_id(
+            source_node_id=request.parent_node_id,
+            assistant_prefix=context.assistant_prefix,
+            model=request.model,
+        )
+        segment = GenerationSegment(
+            segment_id=segment_id,
+            source_node_id=request.parent_node_id,
+            request_prompt=context.root_prompt,
+            context_prefix=context.assistant_prefix,
+            model=request.model,
+            preset=request.preset,
+            temperature=request.temperature,
+            top_p=request.top_p,
+            variation=request.variation,
+            demo_mode=request.demo_mode,
+            mode=mode,
+            tokens=steps,
+            revealed_count=revealed_count,
+            finish_reason=steps[-1].finish_reason if steps else None,
+        )
+        self._segments_by_id[segment_id] = segment
+        return segment
+
+    def _apply_continuation_metadata(
+        self,
+        *,
+        children: list[NodeExpansionCandidate],
+        capabilities: ProviderCapabilities,
+        continuation_mode: str,
+        segment_id: str | None = None,
+        next_cached_token_index: int | None = None,
+        cached_token_count: int = 0,
+    ) -> list[NodeExpansionCandidate]:
+        is_exact = continuation_mode in {"cached_exact", "native_prefill"}
+        updated_children: list[NodeExpansionCandidate] = []
+        for child in children:
+            metadata = {
+                **child.metadata,
+                "supports_assistant_prefill": capabilities.supports_assistant_prefill,
+                "supports_token_logprobs": capabilities.supports_token_logprobs,
+                "minimum_output_tokens": capabilities.minimum_output_tokens,
+                "continuation_mode": continuation_mode,
+                "continuation_mode_label": "Exact" if is_exact else "Approximate",
+                "continuation_mode_is_exact": is_exact,
+            }
+            if not is_exact:
+                metadata["continuation_mode_tooltip"] = (
+                    "Probabilities are computed from a regenerated continuation because exact "
+                    "assistant continuation is unavailable for this provider."
+                )
+            if child.rank == 1:
+                metadata.update(
+                    {
+                        "cached_segment_id": segment_id,
+                        "cached_token_count": cached_token_count,
+                        "cached_tokens_remaining": max(
+                            0,
+                            cached_token_count - (next_cached_token_index or cached_token_count),
+                        ),
+                        "next_cached_token_index": next_cached_token_index,
+                    }
+                )
+            updated_children.append(child.model_copy(update={"metadata": metadata}))
+        return updated_children
+
+    def _log_continue_action(
+        self,
+        *,
+        action: str,
+        mode: str,
+        request: ContinueGenerationRequest,
+        capabilities: ProviderCapabilities,
+        segment_id: str | None,
+        revealed_count: int,
+        cached_token_count: int,
+        source_context: str,
+        raw_first_token_if_requested: str | None,
+        provider_call: bool,
+    ) -> None:
+        if self._settings.app_env.lower() != "development":
+            return
+
+        logger.debug(
+            "CONTINUE ACTION %s",
+            {
+                "action": action,
+                "mode": mode,
+                "provider": str(MODEL_OPTION_MAP.get(request.model, MODEL_OPTIONS[1]).provider),
+                "model": request.model,
+                "supports_assistant_prefill": capabilities.supports_assistant_prefill,
+                "segment_id": segment_id,
+                "revealed_count": revealed_count,
+                "cached_token_count": cached_token_count,
+                "provider_call": provider_call,
+                "source_context": source_context,
+                "raw_first_token_if_requested": raw_first_token_if_requested,
+            },
+        )
+
+    def _reveal_next_cached_token(
+        self,
+        *,
+        request: ContinueGenerationRequest,
+        context: ContinuationContext,
+        capabilities: ProviderCapabilities,
+        segment: GenerationSegment,
+        token_index: int,
+    ) -> ContinueGenerationResponse:
+        if token_index >= len(segment.tokens):
+            raise LLMScopeError(
+                code="CACHED_SEGMENT_EXHAUSTED",
+                message="The cached continuation segment is exhausted.",
+                status_code=409,
+            )
+
+        trace = segment.tokens[token_index]
+        if trace.context_before != context.assistant_prefix:
+            raise LLMScopeError(
+                code="CONTINUATION_CONTEXT_MISMATCH",
+                message="The cached continuation segment no longer matches the selected node context.",
+                status_code=409,
+            )
+
+        children = self._build_expansion_children_from_trace(
+            request=request,
+            trace=trace,
+            latency_ms=trace.latency_ms,
+        )
+        next_cached_token_index = token_index + 1 if token_index + 1 < len(segment.tokens) else None
+        continuation_mode = "cached_exact" if segment.mode == "exact" else "approximate"
+        children = self._apply_continuation_metadata(
+            children=children,
+            capabilities=capabilities,
+            continuation_mode=continuation_mode,
+            segment_id=segment.segment_id,
+            next_cached_token_index=next_cached_token_index,
+            cached_token_count=len(segment.tokens),
+        )
+
+        segment.revealed_count = max(segment.revealed_count, token_index + 1)
+        self._log_continue_action(
+            action="reveal_cached",
+            mode=continuation_mode,
+            request=request,
+            capabilities=capabilities,
+            segment_id=segment.segment_id,
+            revealed_count=segment.revealed_count,
+            cached_token_count=len(segment.tokens),
+            source_context=context.assistant_prefix,
+            raw_first_token_if_requested=None,
+            provider_call=False,
+        )
+        return ContinueGenerationResponse(
+            mode="live",
+            action="reveal_cached",
+            continuation_mode=continuation_mode,
+            parent_node_id=request.parent_node_id,
+            children=children,
+            entropy=trace.entropy,
+            expanded_at=datetime.now(timezone.utc),
+            notes=(
+                "Revealed the next cached token from an approximate continuation segment."
+                if continuation_mode == "approximate"
+                else "Revealed the next cached token from the existing provider segment."
+            ),
+            provider_capabilities=self._serialize_provider_capabilities(capabilities),
+            segment_id=segment.segment_id,
+            revealed_count=segment.revealed_count,
+            cached_token_count=len(segment.tokens),
+            remaining_cached_tokens=max(0, len(segment.tokens) - segment.revealed_count),
+        )
+
+    def _generate_native_prefill_segment(
+        self,
+        *,
+        request: ContinueGenerationRequest,
+        context: ContinuationContext,
+        capabilities: ProviderCapabilities,
+    ) -> ContinueGenerationResponse:
+        prompt = context.root_prompt
+        preset = request.preset if request.preset in PRESET_OPTION_MAP else "general"
+        assistant_prefix = context.assistant_prefix
+        intent, _ = self._detect_intent(prompt.lower())
+        steps, _, latency_ms = self._request_live_steps(
+            request=request,
+            prompt=prompt,
+            preset=preset,
+            intent=intent,
+            assistant_prefix=assistant_prefix,
+            branch_id=request.parent_node_id,
+            parent_node_id=request.parent_node_id,
+            max_output_tokens=1,
+            top_logprobs=request.max_children,
+        )
+        if not steps:
+            self._raise_logprobs_unavailable()
+
+        segment = self._store_generation_segment(
+            request=request,
+            context=context,
+            steps=steps,
+            revealed_count=1,
+            mode="exact",
+        )
+        source_trace = steps[0]
+        latency_value = latency_ms or source_trace.latency_ms
+        children = self._build_expansion_children_from_trace(
+            request=request,
+            trace=source_trace,
+            latency_ms=latency_value,
+        )
+        next_cached_token_index = 1 if len(steps) > 1 else None
+        children = self._apply_continuation_metadata(
+            children=children,
+            capabilities=capabilities,
+            continuation_mode="native_prefill",
+            segment_id=segment.segment_id,
+            next_cached_token_index=next_cached_token_index,
+            cached_token_count=len(steps),
+        )
+
+        self._log_continue_action(
+            action="new_provider_segment",
+            mode="native_prefill",
+            request=request,
+            capabilities=capabilities,
+            segment_id=segment.segment_id,
+            revealed_count=segment.revealed_count,
+            cached_token_count=len(segment.tokens),
+            source_context=context.assistant_prefix,
+            raw_first_token_if_requested=source_trace.token,
+            provider_call=True,
+        )
+        return ContinueGenerationResponse(
+            mode="live",
+            action="new_provider_segment",
+            continuation_mode="native_prefill",
+            parent_node_id=request.parent_node_id,
+            children=children,
+            entropy=source_trace.entropy,
+            expanded_at=datetime.now(timezone.utc),
+            notes=(
+                "Created a new cached provider segment and revealed only its first token."
+            ),
+            provider_capabilities=self._serialize_provider_capabilities(capabilities),
+            segment_id=segment.segment_id,
+            revealed_count=segment.revealed_count,
+            cached_token_count=len(segment.tokens),
+            remaining_cached_tokens=max(0, len(segment.tokens) - segment.revealed_count),
+        )
+
+    def _generate_approximate_segment(
+        self,
+        *,
+        request: ContinueGenerationRequest,
+        context: ContinuationContext,
+        capabilities: ProviderCapabilities,
+    ) -> ContinueGenerationResponse:
+        steps, _, latency_ms = self._request_approximate_steps(
+            request=request,
+            prompt=context.root_prompt,
+            assistant_prefix=context.assistant_prefix,
+            branch_id=request.parent_node_id,
+            parent_node_id=request.parent_node_id,
+            max_output_tokens=1,
+            top_logprobs=request.max_children,
+        )
+        if not steps:
+            self._raise_logprobs_unavailable()
+
+        segment = self._store_generation_segment(
+            request=request,
+            context=context,
+            steps=steps,
+            revealed_count=1,
+            mode="approximate",
+        )
+        source_trace = steps[0]
+        latency_value = latency_ms or source_trace.latency_ms
+        children = self._build_expansion_children_from_trace(
+            request=request,
+            trace=source_trace,
+            latency_ms=latency_value,
+        )
+        next_cached_token_index = 1 if len(steps) > 1 else None
+        children = self._apply_continuation_metadata(
+            children=children,
+            capabilities=capabilities,
+            continuation_mode="approximate",
+            segment_id=segment.segment_id,
+            next_cached_token_index=next_cached_token_index,
+            cached_token_count=len(steps),
+        )
+
+        self._log_continue_action(
+            action="new_provider_segment",
+            mode="approximate",
+            request=request,
+            capabilities=capabilities,
+            segment_id=segment.segment_id,
+            revealed_count=segment.revealed_count,
+            cached_token_count=len(segment.tokens),
+            source_context=context.assistant_prefix,
+            raw_first_token_if_requested=source_trace.token,
+            provider_call=True,
+        )
+        return ContinueGenerationResponse(
+            mode="live",
+            action="new_provider_segment",
+            continuation_mode="approximate",
+            parent_node_id=request.parent_node_id,
+            children=children,
+            entropy=source_trace.entropy,
+            expanded_at=datetime.now(timezone.utc),
+            notes="Created a cached approximate continuation segment and revealed its first token.",
+            provider_capabilities=self._serialize_provider_capabilities(capabilities),
+            segment_id=segment.segment_id,
+            revealed_count=segment.revealed_count,
+            cached_token_count=len(segment.tokens),
+            remaining_cached_tokens=max(0, len(segment.tokens) - segment.revealed_count),
+        )
+
+    def _build_approximate_continuation_prompt(
+        self,
+        *,
+        prompt: str,
+        assistant_prefix: str,
+    ) -> str:
+        return "\n\n".join(
+            [
+                "Continue the unfinished assistant response below.",
+                "Return ONLY the text immediately following the final character.",
+                "\n".join(
+                    [
+                        "Do not repeat the existing response.",
+                        "Do not restart the answer.",
+                        "Do not introduce yourself.",
+                        "Do not add explanations.",
+                    ]
+                ),
+                f"Original user request:\n{prompt}",
+                f"Current assistant response:\n{assistant_prefix}",
+            ]
+        )
+
+    def _request_approximate_steps(
+        self,
+        *,
+        request: NodeExpansionRequest | ContinueGenerationRequest,
+        prompt: str,
+        assistant_prefix: str,
+        branch_id: str,
+        parent_node_id: str,
+        max_output_tokens: int,
+        top_logprobs: int,
+    ) -> tuple[list[TokenTrace], Any | None, int]:
+        client = self._get_client()
+
+        if client is None:
+            raise LLMScopeError(
+                code="OPENAI_NOT_CONFIGURED",
+                message="OpenAI is not configured on the backend. Enable Demo Mode or add an API key.",
+                status_code=503,
+            )
+
+        approximate_prompt = self._build_approximate_continuation_prompt(
+            prompt=prompt,
+            assistant_prefix=assistant_prefix,
+        )
+        capabilities = self._provider_capabilities_for_model(request.model)
+        effective_output_tokens = max(capabilities.minimum_output_tokens, max_output_tokens)
+        input_items = [{"role": "user", "content": approximate_prompt}]
+
+        if self._settings.app_env.lower() == "development":
+            logger.debug(
+                "APPROXIMATE CONTINUATION API INPUT %s",
+                {
+                    "parent_node_id": parent_node_id,
+                    "mode": "approximate",
+                    "request_messages": input_items,
+                    "assistant_prefix": assistant_prefix,
+                    "requested_max_output_tokens": max_output_tokens,
+                    "effective_max_output_tokens": effective_output_tokens,
+                    "top_logprobs": top_logprobs,
+                },
+            )
+
+        start_time = perf_counter()
+        try:
+            response = client.responses.create(
+                model=request.model,
+                input=input_items,
+                include=["message.output_text.logprobs"],
+                max_output_tokens=effective_output_tokens,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                top_logprobs=max(1, min(top_logprobs, 20)),
+            )
+        except Exception as exc:  # pragma: no cover - depends on provider/network.
+            message = "The backend could not fetch token alternatives from the provider."
+            if self._settings.app_env.lower() == "development":
+                message = f"{message} {exc}"
+            raise LLMScopeError(
+                code="PROVIDER_REQUEST_FAILED",
+                message=message,
+                status_code=502,
+            ) from exc
+
+        latency_ms = max(1, int((perf_counter() - start_time) * 1000))
+        output_text, logprob_entries = self._extract_output_text_and_logprobs(response)
+        if self._settings.app_env.lower() == "development":
+            first_entry = logprob_entries[0] if logprob_entries else None
+            logger.debug(
+                "APPROXIMATE CONTINUATION API OUTPUT %s",
+                {
+                    "parent_node_id": parent_node_id,
+                    "mode": "approximate",
+                    "raw_returned_tokens": [getattr(entry, "token", "") for entry in logprob_entries],
+                    "raw_first_token": getattr(first_entry, "token", "") if first_entry else "",
+                    "output_text": output_text,
+                },
+            )
+
+        if not logprob_entries:
+            self._raise_logprobs_unavailable()
+
+        steps = self._build_live_token_traces(
+            branch_id=branch_id,
+            model=request.model,
+            source="openai",
+            parent_node_id=parent_node_id,
+            context_prefix=assistant_prefix,
+            logprob_entries=logprob_entries,
+            latency_ms=latency_ms,
+            finish_reason=getattr(response, "status", None),
+        )
+
+        if not steps and output_text:
+            self._raise_logprobs_unavailable()
+
+        return steps, getattr(response, "usage", None), latency_ms
 
     def _request_live_steps(
         self,
@@ -404,7 +984,8 @@ class GenerationService:
                 }
             )
 
-        effective_output_tokens = max(16, max_output_tokens)
+        capabilities = self._provider_capabilities_for_model(request.model)
+        effective_output_tokens = max(capabilities.minimum_output_tokens, max_output_tokens)
         if self._settings.app_env.lower() == "development" and assistant_prefix:
             logger.debug(
                 "CONTINUATION API INPUT %s",
@@ -412,8 +993,8 @@ class GenerationService:
                     "parent_node_id": parent_node_id,
                     "exact_prompt": prompt,
                     "assistant_prefix": assistant_prefix,
-                    "system_instructions": instructions,
-                    "input_items": input_items,
+                    "continuation_instructions": instructions,
+                    "request_messages": input_items,
                     "requested_max_output_tokens": max_output_tokens,
                     "effective_max_output_tokens": effective_output_tokens,
                     "top_logprobs": top_logprobs,
@@ -445,20 +1026,32 @@ class GenerationService:
         output_text, logprob_entries = self._extract_output_text_and_logprobs(response)
         if self._settings.app_env.lower() == "development" and assistant_prefix:
             first_entry = logprob_entries[0] if logprob_entries else None
+            raw_top_alternatives = [
+                {
+                    "token": getattr(candidate, "token", ""),
+                    "logprob": float(getattr(candidate, "logprob", 0.0)),
+                    "bytes": getattr(candidate, "bytes", []) or [],
+                }
+                for candidate in (getattr(first_entry, "top_logprobs", []) or [])
+            ]
             logger.debug(
                 "CONTINUATION API OUTPUT %s",
                 {
                     "parent_node_id": parent_node_id,
                     "raw_returned_tokens": [getattr(entry, "token", "") for entry in logprob_entries],
-                    "raw_top_logprobs_token_0": [
-                        {
-                            "token": getattr(candidate, "token", ""),
-                            "logprob": float(getattr(candidate, "logprob", 0.0)),
-                            "bytes": getattr(candidate, "bytes", []) or [],
-                        }
-                        for candidate in (getattr(first_entry, "top_logprobs", []) or [])
-                    ],
+                    "raw_first_token": getattr(first_entry, "token", "") if first_entry else "",
+                    "raw_top_logprobs_token_0": raw_top_alternatives,
                     "output_text": output_text,
+                },
+            )
+            logger.debug(
+                "CONTINUATION DIAGNOSTIC %s",
+                {
+                    "exactAssistantPrefix": assistant_prefix,
+                    "rawFirstToken": getattr(first_entry, "token", "") if first_entry else "",
+                    "rawTopAlternatives": raw_top_alternatives,
+                    "requestMessages": input_items,
+                    "continuationInstructions": instructions,
                 },
             )
 
@@ -1197,6 +1790,19 @@ class GenerationService:
         variation: int,
         assistant_prefix: str = "",
     ) -> str:
+        if assistant_prefix:
+            return " ".join(
+                [
+                    "You are continuing an unfinished assistant response inside a model-inspection UI.",
+                    "The original user request already appears earlier in the conversation.",
+                    "Treat the supplied assistant prefix as the active assistant turn and continue from its exact endpoint.",
+                    "Emit only the immediate next assistant text that follows that exact prefix.",
+                    CONTINUATION_TONE_HINTS[preset],
+                    "Do not restart the answer, repeat the prefix, summarize it, quote it, or open a new user or assistant turn.",
+                    "Preserve whitespace, punctuation, markdown, Unicode, and formatting exactly as continuation context.",
+                ]
+            )
+
         style_hint = RESPONSE_STYLE_HINTS[variation % len(RESPONSE_STYLE_HINTS)]
         parts = [
             "You are answering inside a model-inspection UI.",
@@ -1207,15 +1813,6 @@ class GenerationService:
             style_hint,
             f"Detected intent: {intent}.",
         ]
-
-        if assistant_prefix:
-            parts.extend(
-                [
-                    "Continue the existing assistant response from the provided prefix exactly where it stops.",
-                    "Do not restart the answer, repeat the prefix, or begin a new answer.",
-                    "Your next output must be the immediate continuation of that exact assistant text.",
-                ]
-            )
 
         return " ".join(parts)
 

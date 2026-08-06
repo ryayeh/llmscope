@@ -64,6 +64,7 @@ import {
 } from "@/lib/token-graph";
 import type {
   AlternativeCandidate,
+  ContinueGenerationResponse,
   GenerationResponse,
   ModelCatalogResponse,
   ModelOption,
@@ -218,6 +219,44 @@ function formatNumber(value: number) {
 function formatSignedPercent(value: number) {
   const rounded = (value * 100).toFixed(1);
   return `${value >= 0 ? "+" : ""}${rounded}%`;
+}
+
+function readMetadataString(
+  metadata: Record<string, string | number | boolean | null> | null | undefined,
+  key: string,
+) {
+  return typeof metadata?.[key] === "string" ? String(metadata[key]) : null;
+}
+
+function readMetadataNumber(
+  metadata: Record<string, string | number | boolean | null> | null | undefined,
+  key: string,
+) {
+  return typeof metadata?.[key] === "number" ? Number(metadata[key]) : null;
+}
+
+function readMetadataBoolean(
+  metadata: Record<string, string | number | boolean | null> | null | undefined,
+  key: string,
+) {
+  return typeof metadata?.[key] === "boolean" ? Boolean(metadata[key]) : null;
+}
+
+function getContinuationModePresentation(
+  metadata: Record<string, string | number | boolean | null> | null | undefined,
+) {
+  const explicitLabel = readMetadataString(metadata, "continuation_mode_label");
+  const explicitMode = readMetadataString(metadata, "continuation_mode");
+  const isExact =
+    readMetadataBoolean(metadata, "continuation_mode_is_exact") ??
+    (explicitMode ? explicitMode !== "approximate" : true);
+
+  return {
+    label: explicitLabel ?? (isExact ? "Exact" : "Approximate"),
+    mode: explicitMode ?? (isExact ? "cached_exact" : "approximate"),
+    title: readMetadataString(metadata, "continuation_mode_tooltip"),
+    tone: isExact ? ("exact" as const) : ("approximate" as const),
+  };
 }
 
 function getProbabilityModeLabel(mode: ProbabilityViewMode) {
@@ -2040,6 +2079,17 @@ function Workspace() {
     }),
     [activeSentenceNodes],
   );
+  const currentRealityContinuationMode = useMemo(
+    () =>
+      getContinuationModePresentation(
+        activeSentenceNodes[activeSentenceNodes.length - 1]?.data.metadata ?? selectedNode?.data.metadata,
+      ),
+    [activeSentenceNodes, selectedNode?.data.metadata],
+  );
+  const inspectorContinuationMode = useMemo(
+    () => getContinuationModePresentation(selectedNode?.data.metadata ?? null),
+    [selectedNode?.data.metadata],
+  );
   const compareNodes = [
     compareLeftId ? displayNodeMap.get(compareLeftId) ?? null : null,
     compareRightId ? displayNodeMap.get(compareRightId) ?? null : null,
@@ -2595,6 +2645,248 @@ function Workspace() {
     }
   }
 
+  function getPreferredContinuationTarget(nodeId: string) {
+    const currentChoice = branchChoicesRef.current[nodeId];
+    const currentEdges = edgesRef.current.filter((edge) => edge.source === nodeId);
+
+    if (currentChoice && currentEdges.some((edge) => edge.target === currentChoice)) {
+      return currentChoice;
+    }
+
+    return currentEdges.sort(
+      (left, right) =>
+        ensureProbabilityEdgeData(right.data).probability -
+        ensureProbabilityEdgeData(left.data).probability,
+    )[0]?.target ?? null;
+  }
+
+  function applyExpansionPayloadToCanvas(
+    nodeId: string,
+    parentNode: TokenFlowNode,
+    validation: ReturnType<typeof buildContinuationValidation>,
+    payload: NodeExpansionResponse | ContinueGenerationResponse,
+    options?: { pushHistory?: boolean },
+  ) {
+    const nextTokenGraph = applyExpansionToTokenGraph(tokenGraphRef.current, nodeId, payload, {
+      requestPrompt: validation.rootPrompt,
+      model: parentNode.data.requestModel,
+      preset: parentNode.data.requestPreset,
+      temperature: parentNode.data.requestTemperature,
+      topP: parentNode.data.requestTopP,
+      variation: parentNode.data.requestVariation,
+      demoMode: parentNode.data.requestDemoMode,
+    });
+    setTokenGraph(nextTokenGraph);
+    tokenGraphRef.current = nextTokenGraph;
+
+    const reasoning: ReasoningBundle = {
+      notes: payload.notes || parentNode.data.sourceNotes,
+      intent: parentNode.data.reasoningIntent,
+      strategy: parentNode.data.reasoningStrategy,
+      focusTerms: parentNode.data.reasoningFocusTerms,
+    };
+    const currentChildren = edgesRef.current
+      .filter((edge) => edge.source === nodeId)
+      .map((edge) => nodesRef.current.find((item) => item.id === edge.target))
+      .filter((item): item is TokenFlowNode => Boolean(item));
+    const responseChildIds = new Set(payload.children.map((candidate) => candidate.id));
+    const staleNodeIds = new Set<string>();
+
+    for (const child of currentChildren) {
+      if (responseChildIds.has(child.id)) {
+        continue;
+      }
+
+      staleNodeIds.add(child.id);
+      for (const descendantId of collectDescendantIds(child.id, edgesRef.current)) {
+        staleNodeIds.add(descendantId);
+      }
+    }
+
+    const nextNodes = nodesRef.current.filter((currentNode) => !staleNodeIds.has(currentNode.id));
+    const nextEdges = edgesRef.current.filter(
+      (edge) =>
+        !staleNodeIds.has(edge.source) &&
+        !staleNodeIds.has(edge.target) &&
+        (edge.source !== nodeId || responseChildIds.has(edge.target)),
+    );
+    let graphStructureChanged = staleNodeIds.size > 0;
+
+    for (const candidate of payload.children) {
+      const matchingChild = currentChildren.find((child) => child.id === candidate.id);
+
+      if (matchingChild) {
+        const nextIndex = nextNodes.findIndex((item) => item.id === matchingChild.id);
+
+        nextNodes[nextIndex] = {
+          ...matchingChild,
+          data: {
+            ...matchingChild.data,
+            probability: candidate.probability,
+            rawProbability: candidate.raw_probability,
+            normalizedDisplayedProbability: candidate.normalized_displayed_probability,
+            logProbability: candidate.log_probability,
+            entropy: candidate.entropy,
+            latency: candidate.latency_ms,
+            tokenId: candidate.token_id ?? null,
+            tokenizerId: candidate.tokenizer_id ?? null,
+            displayTokenText: candidate.display_token,
+            cumulativeProbability: candidate.cumulative_probability,
+            rank: candidate.rank,
+            isMainPath: matchingChild.data.isMainPath || candidate.rank === 1,
+            responseMode: payload.mode,
+            sourceNotes: payload.notes || matchingChild.data.sourceNotes,
+            branchRationale: candidate.rationale ?? matchingChild.data.branchRationale,
+            metadata: candidate.metadata ?? matchingChild.data.metadata,
+            sourceAlternatives: [],
+            distributionMessage: null,
+          },
+        };
+      } else {
+        nextNodes.push(
+          buildTokenNode({
+            id: candidate.id,
+            token: candidate.token,
+            tokenId: candidate.token_id ?? null,
+            tokenizerId: candidate.tokenizer_id ?? null,
+            displayToken: candidate.display_token,
+            decodedContribution: candidate.decoded_contribution ?? candidate.token,
+            cumulativeDecodedText:
+              candidate.cumulative_decoded_text ?? candidate.context_after ?? candidate.text_preview,
+            cumulativeRawText:
+              candidate.context_after ??
+              candidate.cumulative_decoded_text ??
+              candidate.text_preview ??
+              candidate.token,
+            cumulativeTokenIds: candidate.cumulative_token_ids ?? null,
+            cumulativeLogProbability:
+              candidate.cumulative_log_probability ?? candidate.log_probability,
+            contextBefore: candidate.context_before,
+            contextAfter: candidate.context_after,
+            generationStep: candidate.generation_step ?? Math.max(candidate.depth - 1, 0),
+            probability: candidate.probability,
+            rawProbability: candidate.raw_probability,
+            normalizedDisplayedProbability: candidate.normalized_displayed_probability,
+            logProbability: candidate.log_probability,
+            entropy: candidate.entropy,
+            cumulativeProbability: candidate.cumulative_probability,
+            latency: candidate.latency_ms,
+            depth: candidate.depth,
+            rank: candidate.rank,
+            parentId: nodeId,
+            position: {
+              x: parentNode.position.x + HORIZONTAL_GAP,
+              y: parentNode.position.y,
+            },
+            prompt: parentNode.data.requestPrompt,
+            model: parentNode.data.requestModel,
+            preset: parentNode.data.requestPreset,
+            temperature: parentNode.data.requestTemperature,
+            topP: parentNode.data.requestTopP,
+            variation: parentNode.data.requestVariation,
+            demoMode: parentNode.data.requestDemoMode,
+            responseMode: payload.mode,
+            textPreview: candidate.text_preview,
+            isMainPath: candidate.rank === 1,
+            status: "idle",
+            reasoning,
+            branchRationale: candidate.rationale ?? null,
+            metadata: candidate.metadata ?? {},
+            rawLogits: null,
+            sourceAlternatives: [],
+          }),
+        );
+        graphStructureChanged = true;
+      }
+
+      const nextEdge = buildEdge(nodeId, candidate.id, candidate.probability, candidate.rank === 1);
+      const existingEdgeIndex = nextEdges.findIndex((edge) => edge.id === nextEdge.id);
+
+      if (existingEdgeIndex >= 0) {
+        nextEdges[existingEdgeIndex] = {
+          ...nextEdges[existingEdgeIndex],
+          data: nextEdge.data,
+        };
+      } else {
+        nextEdges.push(nextEdge);
+      }
+    }
+
+    const parentIndex = nextNodes.findIndex((item) => item.id === nodeId);
+
+    nextNodes[parentIndex] = {
+      ...nextNodes[parentIndex],
+      data: {
+        ...nextNodes[parentIndex].data,
+        distributionRequested: true,
+        isCollapsed: false,
+        status: "ready",
+        responseMode: payload.mode,
+        sourceNotes: payload.notes || nextNodes[parentIndex].data.sourceNotes,
+        distributionMessage: null,
+      },
+    };
+
+    const syncedNodes = syncFlowNodesWithTokenGraph(nextNodes, nextTokenGraph);
+
+    if (SHOULD_LOG_CONTINUATION) {
+      const syncedNodeMap = new Map(syncedNodes.map((currentNode) => [currentNode.id, currentNode]));
+      logContinuationDebug("flow-nodes", {
+        parentNodeId: nodeId,
+        action: "action" in payload ? payload.action : "expand",
+        createdNodes: payload.children.map((candidate) => {
+          const flowNode = syncedNodeMap.get(candidate.id);
+
+          return {
+            rawApiToken: candidate.token,
+            rawLogprob: candidate.log_probability,
+            parsedGeneratedToken: candidate.token,
+            parsedAlternatives: payload.children
+              .filter((otherCandidate) => otherCandidate.id !== candidate.id)
+              .map((otherCandidate) => ({
+                token: otherCandidate.token,
+                logprob: otherCandidate.log_probability,
+                probability: otherCandidate.probability,
+                rank: otherCandidate.rank,
+              })),
+            contextBefore: candidate.context_before,
+            contextThrough: candidate.context_after,
+            flowNode: flowNode
+              ? {
+                  id: flowNode.id,
+                  token: flowNode.data.tokenText,
+                  predictionId: flowNode.data.predictionId,
+                  cachedSegmentId: readMetadataString(flowNode.data.metadata, "cached_segment_id"),
+                  nextCachedTokenIndex: readMetadataNumber(
+                    flowNode.data.metadata,
+                    "next_cached_token_index",
+                  ),
+                  topAlternatives: flowNode.data.topAlternatives.map((alternative) => ({
+                    token: alternative.token,
+                    probability: alternative.rawProbability ?? alternative.probability,
+                    rank: alternative.rank,
+                  })),
+                  contextBefore: flowNode.data.contextBefore,
+                  contextThrough: flowNode.data.contextAfter,
+                }
+              : null,
+          };
+        }),
+      });
+    }
+
+    applyTransition(
+      {
+        nodes: syncedNodes,
+        edges: nextEdges,
+        selectedNodeId: nodeId,
+      },
+      graphStructureChanged ? { pushHistory: false } : options,
+    );
+
+    return true;
+  }
+
   async function expandContinuationNode(nodeId: string, options?: { pushHistory?: boolean }) {
     const node = nodesRef.current.find((currentNode) => currentNode.id === nodeId);
     const validation = buildContinuationValidation(tokenGraphRef.current, nodeId);
@@ -2690,211 +2982,7 @@ function Workspace() {
       if (!parentNode) {
         return false;
       }
-
-      const nextTokenGraph = applyExpansionToTokenGraph(tokenGraphRef.current, nodeId, payload, {
-        requestPrompt: validation.rootPrompt,
-        model: node.data.requestModel,
-        preset: node.data.requestPreset,
-        temperature: node.data.requestTemperature,
-        topP: node.data.requestTopP,
-        variation: node.data.requestVariation,
-        demoMode: node.data.requestDemoMode,
-      });
-      setTokenGraph(nextTokenGraph);
-      tokenGraphRef.current = nextTokenGraph;
-
-      const reasoning: ReasoningBundle = {
-        notes: payload.notes || parentNode.data.sourceNotes,
-        intent: parentNode.data.reasoningIntent,
-        strategy: parentNode.data.reasoningStrategy,
-        focusTerms: parentNode.data.reasoningFocusTerms,
-      };
-      const currentChildren = edgesRef.current
-        .filter((edge) => edge.source === nodeId)
-        .map((edge) => nodesRef.current.find((item) => item.id === edge.target))
-        .filter((item): item is TokenFlowNode => Boolean(item));
-      const responseChildIds = new Set(payload.children.map((candidate) => candidate.id));
-      const staleNodeIds = new Set<string>();
-
-      for (const child of currentChildren) {
-        if (responseChildIds.has(child.id)) {
-          continue;
-        }
-
-        staleNodeIds.add(child.id);
-        for (const descendantId of collectDescendantIds(child.id, edgesRef.current)) {
-          staleNodeIds.add(descendantId);
-        }
-      }
-
-      const nextNodes = nodesRef.current.filter((currentNode) => !staleNodeIds.has(currentNode.id));
-      const nextEdges = edgesRef.current.filter(
-        (edge) =>
-          !staleNodeIds.has(edge.source) &&
-          !staleNodeIds.has(edge.target) &&
-          (edge.source !== nodeId || responseChildIds.has(edge.target)),
-      );
-      let graphStructureChanged = staleNodeIds.size > 0;
-      for (const candidate of payload.children) {
-        const matchingChild = currentChildren.find((child) => child.id === candidate.id);
-
-        if (matchingChild) {
-          const nextIndex = nextNodes.findIndex((item) => item.id === matchingChild.id);
-
-          nextNodes[nextIndex] = {
-            ...matchingChild,
-            data: {
-              ...matchingChild.data,
-              probability: candidate.probability,
-              rawProbability: candidate.raw_probability,
-              normalizedDisplayedProbability: candidate.normalized_displayed_probability,
-              logProbability: candidate.log_probability,
-              entropy: candidate.entropy,
-              latency: candidate.latency_ms,
-              tokenId: candidate.token_id ?? null,
-              tokenizerId: candidate.tokenizer_id ?? null,
-              displayTokenText: candidate.display_token,
-              cumulativeProbability: candidate.cumulative_probability,
-              rank: candidate.rank,
-              isMainPath: matchingChild.data.isMainPath || candidate.rank === 1,
-              responseMode: payload.mode,
-              sourceNotes: payload.notes || matchingChild.data.sourceNotes,
-              branchRationale: candidate.rationale ?? matchingChild.data.branchRationale,
-              sourceAlternatives: [],
-              distributionMessage: null,
-            },
-          };
-        } else {
-          nextNodes.push(
-            buildTokenNode({
-              id: candidate.id,
-              token: candidate.token,
-              tokenId: candidate.token_id ?? null,
-              tokenizerId: candidate.tokenizer_id ?? null,
-              displayToken: candidate.display_token,
-              decodedContribution: candidate.decoded_contribution ?? candidate.token,
-              cumulativeDecodedText:
-                candidate.cumulative_decoded_text ?? candidate.context_after ?? candidate.text_preview,
-              cumulativeTokenIds: candidate.cumulative_token_ids ?? null,
-              cumulativeLogProbability:
-                candidate.cumulative_log_probability ?? candidate.log_probability,
-              contextBefore: candidate.context_before,
-              contextAfter: candidate.context_after,
-              generationStep: candidate.generation_step ?? Math.max(candidate.depth - 1, 0),
-              probability: candidate.probability,
-              rawProbability: candidate.raw_probability,
-              normalizedDisplayedProbability: candidate.normalized_displayed_probability,
-              logProbability: candidate.log_probability,
-              entropy: candidate.entropy,
-              cumulativeProbability: candidate.cumulative_probability,
-              latency: candidate.latency_ms,
-              depth: candidate.depth,
-              rank: candidate.rank,
-              parentId: nodeId,
-              position: {
-                x: parentNode.position.x + HORIZONTAL_GAP,
-                y: parentNode.position.y,
-              },
-              prompt: node.data.requestPrompt,
-              model: node.data.requestModel,
-              preset: node.data.requestPreset,
-              temperature: node.data.requestTemperature,
-              topP: node.data.requestTopP,
-              variation: node.data.requestVariation,
-              demoMode: node.data.requestDemoMode,
-              responseMode: payload.mode,
-              textPreview: candidate.text_preview,
-              isMainPath: candidate.rank === 1,
-              status: "idle",
-              reasoning,
-              branchRationale: candidate.rationale ?? null,
-              metadata: candidate.metadata ?? {},
-              rawLogits: null,
-              sourceAlternatives: [],
-            }),
-          );
-          graphStructureChanged = true;
-        }
-
-        const nextEdge = buildEdge(nodeId, candidate.id, candidate.probability, candidate.rank === 1);
-        const existingEdgeIndex = nextEdges.findIndex((edge) => edge.id === nextEdge.id);
-
-        if (existingEdgeIndex >= 0) {
-          nextEdges[existingEdgeIndex] = {
-            ...nextEdges[existingEdgeIndex],
-            data: nextEdge.data,
-          };
-        } else {
-          nextEdges.push(nextEdge);
-        }
-      }
-
-      const parentIndex = nextNodes.findIndex((item) => item.id === nodeId);
-
-      nextNodes[parentIndex] = {
-        ...nextNodes[parentIndex],
-        data: {
-          ...nextNodes[parentIndex].data,
-          distributionRequested: true,
-          isCollapsed: false,
-          status: "ready",
-          responseMode: payload.mode,
-          sourceNotes: payload.notes || nextNodes[parentIndex].data.sourceNotes,
-          distributionMessage: null,
-        },
-      };
-
-      const syncedNodes = syncFlowNodesWithTokenGraph(nextNodes, nextTokenGraph);
-
-      if (SHOULD_LOG_CONTINUATION) {
-        const syncedNodeMap = new Map(syncedNodes.map((currentNode) => [currentNode.id, currentNode]));
-        logContinuationDebug("flow-nodes", {
-          parentNodeId: nodeId,
-          createdNodes: payload.children.map((candidate) => {
-            const flowNode = syncedNodeMap.get(candidate.id);
-
-            return {
-              rawApiToken: candidate.token,
-              rawLogprob: candidate.log_probability,
-              parsedGeneratedToken: candidate.token,
-              parsedAlternatives: payload.children
-                .filter((otherCandidate) => otherCandidate.id !== candidate.id)
-                .map((otherCandidate) => ({
-                  token: otherCandidate.token,
-                  logprob: otherCandidate.log_probability,
-                  probability: otherCandidate.probability,
-                  rank: otherCandidate.rank,
-                })),
-              contextBefore: candidate.context_before,
-              contextThrough: candidate.context_after,
-              flowNode: flowNode
-                ? {
-                    id: flowNode.id,
-                    token: flowNode.data.tokenText,
-                    predictionId: flowNode.data.predictionId,
-                    topAlternatives: flowNode.data.topAlternatives.map((alternative) => ({
-                      token: alternative.token,
-                      probability: alternative.rawProbability ?? alternative.probability,
-                      rank: alternative.rank,
-                    })),
-                    contextBefore: flowNode.data.contextBefore,
-                    contextThrough: flowNode.data.contextAfter,
-                  }
-                : null,
-            };
-          }),
-        });
-      }
-
-      applyTransition(
-        {
-          nodes: syncedNodes,
-          edges: nextEdges,
-          selectedNodeId: nodeId,
-        },
-        graphStructureChanged ? { pushHistory: false } : options,
-      );
-
+      applyExpansionPayloadToCanvas(nodeId, parentNode, validation, payload, options);
       setBackendState("online");
       return true;
     } catch (error) {
@@ -3074,41 +3162,140 @@ function Workspace() {
 
   expandNodeRef.current = expandTokenOccurrence;
 
-  async function continueGenerationFrom(nodeId: string, steps: number) {
-    const validation = buildContinuationValidation(tokenGraphRef.current, nodeId);
+  async function requestContinuationStep(
+    nodeId: string,
+    validation: ReturnType<typeof buildContinuationValidation>,
+  ) {
+    const node = nodesRef.current.find((currentNode) => currentNode.id === nodeId);
 
-    if (!validation.isValid) {
-      setErrorMessage(validation.warnings.join(" "));
-      setContinuationPreview({
-        nodeId,
-        steps,
-        validation,
-      });
-      return;
+    if (!node || node.data.status === "loading") {
+      return false;
     }
 
+    applyTransition(
+      {
+        nodes: nodesRef.current.map((currentNode) =>
+          currentNode.id === nodeId
+            ? {
+                ...currentNode,
+                data: {
+                  ...currentNode.data,
+                  status: "loading",
+                },
+              }
+            : currentNode,
+        ),
+        selectedNodeId: nodeId,
+      },
+      { pushHistory: false },
+    );
+
+    try {
+      const response = await fetch("/api/continue-node", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          root_prompt: validation.rootPrompt,
+          model: node.data.requestModel,
+          preset: node.data.requestPreset,
+          temperature: node.data.requestTemperature,
+          top_p: node.data.requestTopP,
+          parent_node_id: nodeId,
+          parent_token: node.data.tokenText,
+          assistant_prefix: validation.assistantPrefix,
+          reconstructed_prompt: validation.reconstructedPrompt,
+          expected_prompt_length: validation.characterLength,
+          expected_utf8_length: validation.utf8Length,
+          expected_token_count: validation.tokenCount,
+          depth: node.data.depth,
+          cumulative_probability: node.data.cumulativeProbability,
+          variation: node.data.requestVariation,
+          max_children: MAX_BRANCH_CHILDREN,
+          demo_mode: node.data.requestDemoMode,
+          cached_segment_id: readMetadataString(node.data.metadata, "cached_segment_id"),
+          cached_token_index: readMetadataNumber(node.data.metadata, "next_cached_token_index"),
+        }),
+      });
+
+      if (!response.ok) {
+        await throwApiError(response);
+      }
+
+      const payload = (await response.json()) as ContinueGenerationResponse;
+      const parentNode = nodesRef.current.find((currentNode) => currentNode.id === nodeId);
+
+      if (!parentNode) {
+        return false;
+      }
+
+      applyExpansionPayloadToCanvas(nodeId, parentNode, validation, payload, { pushHistory: false });
+      setBackendState("online");
+      return true;
+    } catch (error) {
+      const errorCode = getErrorCode(error);
+      setBackendState(errorCode === "PROVIDER_REQUEST_FAILED" ? "offline" : "online");
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unable to continue the selected branch.",
+      );
+      applyTransition(
+        {
+          nodes: nodesRef.current.map((currentNode) =>
+            currentNode.id === nodeId
+              ? {
+                  ...currentNode,
+                  data: {
+                    ...currentNode.data,
+                    status: "ready",
+                  },
+                }
+              : currentNode,
+          ),
+        },
+        { pushHistory: false },
+      );
+      return false;
+    }
+  }
+
+  async function continueGenerationFrom(nodeId: string, steps: number) {
     let currentNodeId = nodeId;
 
     for (let step = 0; step < steps; step += 1) {
-      const expanded = await expandContinuationNode(currentNodeId, { pushHistory: false });
+      const existingTarget = getPreferredContinuationTarget(currentNodeId);
+
+      if (existingTarget) {
+        currentNodeId = existingTarget;
+        activateReality(currentNodeId, { pushHistory: false });
+        continue;
+      }
+
+      const validation = buildContinuationValidation(tokenGraphRef.current, currentNodeId);
+
+      if (!validation.isValid) {
+        setErrorMessage(validation.warnings.join(" "));
+        setContinuationPreview({
+          nodeId: currentNodeId,
+          steps: Math.max(1, steps - step),
+          validation,
+        });
+        break;
+      }
+
+      const expanded = await requestContinuationStep(currentNodeId, validation);
 
       if (!expanded) {
         break;
       }
 
-      const preferredEdge = edgesRef.current
-        .filter((edge) => edge.source === currentNodeId)
-        .sort(
-          (left, right) =>
-            ensureProbabilityEdgeData(right.data).probability -
-            ensureProbabilityEdgeData(left.data).probability,
-        )[0];
+      const nextTarget = getPreferredContinuationTarget(currentNodeId);
 
-      if (!preferredEdge) {
+      if (!nextTarget) {
         break;
       }
 
-      currentNodeId = preferredEdge.target;
+      currentNodeId = nextTarget;
       activateReality(currentNodeId, { pushHistory: false });
     }
 
@@ -3975,6 +4162,9 @@ function Workspace() {
 
       <CurrentRealityPanel
         collapsed={isSentenceBarCollapsed}
+        continuationModeLabel={currentRealityContinuationMode.label}
+        continuationModeTitle={currentRealityContinuationMode.title}
+        continuationModeTone={currentRealityContinuationMode.tone}
         hasContent={hasSentenceContent}
         onSelectToken={(nodeId) => {
           activateReality(nodeId, { pushHistory: true });
@@ -4224,6 +4414,17 @@ function Workspace() {
                 <div>
                   <dt>Mode</dt>
                   <dd>{getProbabilityModeLabel(probabilityViewMode)}</dd>
+                </div>
+                <div>
+                  <dt>Continuation</dt>
+                  <dd>
+                    <span
+                      className={`inspector-inline-badge inspector-inline-badge--${inspectorContinuationMode.tone}`}
+                      title={inspectorContinuationMode.title ?? undefined}
+                    >
+                      {`Mode: ${inspectorContinuationMode.label}`}
+                    </span>
+                  </dd>
                 </div>
                 <div>
                   <dt>Rank</dt>

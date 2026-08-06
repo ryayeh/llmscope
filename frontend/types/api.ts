@@ -140,6 +140,12 @@ export interface GenerationStats {
   generated_at: string;
 }
 
+export interface ProviderCapabilitiesDetail {
+  supports_assistant_prefill: boolean;
+  supports_token_logprobs: boolean;
+  minimum_output_tokens: number;
+}
+
 export interface GenerationResponse {
   mode: string;
   prompt_used: string;
@@ -171,6 +177,11 @@ export interface NodeExpansionRequest {
   variation: number;
   max_children: number;
   demo_mode: boolean;
+}
+
+export interface ContinueGenerationRequest extends NodeExpansionRequest {
+  cached_segment_id?: string | null;
+  cached_token_index?: number | null;
 }
 
 export interface NodeExpansionCandidate {
@@ -213,6 +224,16 @@ export interface NodeExpansionResponse {
   entropy: number;
   expanded_at: string;
   notes: string;
+}
+
+export interface ContinueGenerationResponse extends NodeExpansionResponse {
+  action: "reveal_cached" | "new_provider_segment";
+  continuation_mode: "cached_exact" | "native_prefill" | "approximate";
+  provider_capabilities: ProviderCapabilitiesDetail;
+  segment_id?: string | null;
+  revealed_count: number;
+  cached_token_count: number;
+  remaining_cached_tokens: number;
 }
 
 export interface HealthResponse {

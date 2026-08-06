@@ -130,6 +130,12 @@ class GenerationStats(BaseModel):
     generated_at: datetime
 
 
+class ProviderCapabilitiesDetail(BaseModel):
+    supports_assistant_prefill: bool
+    supports_token_logprobs: bool
+    minimum_output_tokens: int = Field(..., ge=1)
+
+
 class GenerationRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=10000)
     model: str = Field(default="gpt-4.1-mini")
@@ -199,6 +205,11 @@ class NodeExpansionRequest(BaseModel):
         return value
 
 
+class ContinueGenerationRequest(NodeExpansionRequest):
+    cached_segment_id: str | None = Field(default=None, min_length=1)
+    cached_token_index: int | None = Field(default=None, ge=0)
+
+
 class NodeExpansionCandidate(BaseModel):
     id: str
     branch_id: str
@@ -239,6 +250,16 @@ class NodeExpansionResponse(BaseModel):
     entropy: float = Field(..., ge=0)
     expanded_at: datetime
     notes: str
+
+
+class ContinueGenerationResponse(NodeExpansionResponse):
+    action: Literal["reveal_cached", "new_provider_segment"]
+    continuation_mode: Literal["cached_exact", "native_prefill", "approximate"]
+    provider_capabilities: ProviderCapabilitiesDetail
+    segment_id: str | None = None
+    revealed_count: int = Field(..., ge=0)
+    cached_token_count: int = Field(..., ge=0)
+    remaining_cached_tokens: int = Field(..., ge=0)
 
 
 TokenTreeNode.model_rebuild()
