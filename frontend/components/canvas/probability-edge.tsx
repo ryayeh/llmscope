@@ -72,7 +72,9 @@ export function ProbabilityEdge({
     isDimmed: data?.isDimmed ?? false,
     isFocused: data?.isFocused ?? false,
   });
-  const [path] = getBezierPath({
+  const isModeBoundary = data?.isModeBoundary ?? false;
+  const continuationMode = data?.continuationMode ?? "exact";
+  const [path, labelX, labelY] = getBezierPath({
     sourceX,
     sourceY,
     sourcePosition,
@@ -91,6 +93,7 @@ export function ProbabilityEdge({
         style={{
           stroke: tone.glow,
           strokeWidth: tone.width + 8,
+          strokeDasharray: isModeBoundary ? "8 7" : undefined,
           opacity: tone.opacity,
         }}
       />
@@ -101,9 +104,34 @@ export function ProbabilityEdge({
         style={{
           stroke: tone.stroke,
           strokeWidth: tone.width,
+          strokeDasharray: isModeBoundary ? "8 7" : undefined,
           opacity: tone.opacity,
         }}
       />
+      {isModeBoundary && continuationMode === "approximate" ? (
+        <g transform={`translate(${labelX}, ${labelY})`}>
+          <rect
+            fill="rgba(245, 158, 11, 0.14)"
+            height="18"
+            rx="9"
+            stroke="rgba(245, 158, 11, 0.28)"
+            strokeWidth="1"
+            width="20"
+            x="-10"
+            y="-9"
+          />
+          <text
+            fill="#fcd34d"
+            fontFamily="inherit"
+            fontSize="10"
+            fontWeight="700"
+            textAnchor="middle"
+            y="3"
+          >
+            ≈
+          </text>
+        </g>
+      ) : null}
     </>
   );
 }

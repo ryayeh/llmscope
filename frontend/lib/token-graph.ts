@@ -1,5 +1,6 @@
 import type {
   AlternativeCandidate,
+  ContinuationMode,
   GenerationResponse,
   NodeExpansionCandidate,
   NodeExpansionResponse,
@@ -9,6 +10,8 @@ import type {
 export interface TokenGraphAlternativeRecord {
   nodeId: string | null;
   branchId: string | null;
+  continuationMode: ContinuationMode;
+  segmentId: string | null;
   rawToken: string;
   displayToken: string;
   decodedContribution: string;
@@ -41,6 +44,8 @@ export interface TokenGraphNodeRecord {
   childIds: string[];
   generationId: string;
   branchId: string;
+  continuationMode: ContinuationMode;
+  segmentId: string | null;
   rawToken: string;
   displayToken: string;
   decodedContribution: string;
@@ -89,6 +94,8 @@ export interface TokenGraphGenerationRecord {
   id: string;
   parentGenerationId: string | null;
   parentNodeId: string | null;
+  continuationMode: ContinuationMode;
+  segmentId: string | null;
   requestPrompt: string;
   assistantPrefix: string;
   model: string;
@@ -288,6 +295,8 @@ function toAlternativeRecord(node: TokenGraphNodeRecord): TokenGraphAlternativeR
   return {
     nodeId: node.id,
     branchId: node.branchId,
+    continuationMode: node.continuationMode,
+    segmentId: node.segmentId,
     rawToken: node.rawToken,
     displayToken: node.displayToken,
     decodedContribution: node.decodedContribution,
@@ -360,6 +369,8 @@ function buildSiblingAlternativeNode(
       alternative.branchId ??
       existing?.branchId ??
       `${selectedNode.branchId}:alt:${tokenIndex}:${candidateRank}`,
+    continuationMode: alternative.continuationMode,
+    segmentId: alternative.segmentId,
     rawToken: alternative.rawToken,
     displayToken: alternative.displayToken,
     decodedContribution,
@@ -431,6 +442,8 @@ function mapAlternativeCandidate(
     nodeId: candidate.node_id ?? null,
     branchId:
       typeof candidate.metadata?.branch_id === "string" ? candidate.metadata.branch_id : null,
+    continuationMode: candidate.continuation_mode ?? "exact",
+    segmentId: candidate.segment_id ?? null,
     rawToken: candidate.token,
     displayToken: buildCanonicalDisplayToken(decodedContribution, candidate.display_token ?? null),
     decodedContribution,
@@ -489,6 +502,8 @@ function buildInitialTokenNode(
     childIds: [],
     generationId,
     branchId: trace.branch_id,
+    continuationMode: trace.continuation_mode ?? "exact",
+    segmentId: trace.segment_id ?? null,
     rawToken: trace.token,
     displayToken: buildCanonicalDisplayToken(decodedContribution, trace.display_token),
     decodedContribution,
@@ -568,6 +583,8 @@ function buildExpansionNode(
     childIds: [],
     generationId,
     branchId: candidate.branch_id,
+    continuationMode: candidate.continuation_mode ?? "exact",
+    segmentId: candidate.segment_id ?? null,
     rawToken: candidate.token,
     displayToken: buildCanonicalDisplayToken(decodedContribution, candidate.display_token),
     decodedContribution,
@@ -638,6 +655,8 @@ export function createTokenGraphFromGeneration(payload: GenerationResponse): Tok
     childIds: [],
     generationId,
     branchId: "root",
+    continuationMode: "exact",
+    segmentId: null,
     rawToken: payload.prompt_used,
     displayToken: payload.prompt_used,
     decodedContribution: "",
@@ -717,6 +736,8 @@ export function createTokenGraphFromGeneration(payload: GenerationResponse): Tok
         id: generationId,
         parentGenerationId: null,
         parentNodeId: rootNode.id,
+        continuationMode: "exact",
+        segmentId: payload.tokens[0]?.segment_id ?? null,
         requestPrompt: payload.prompt_used,
         assistantPrefix,
         model: payload.request.model,
@@ -805,6 +826,8 @@ export function applyExpansionToTokenGraph(
         id: generationId,
         parentGenerationId,
         parentNodeId,
+        continuationMode: payload.children[0]?.continuation_mode ?? nodesById[parentNodeId].continuationMode,
+        segmentId: payload.children[0]?.segment_id ?? null,
         requestPrompt: options.requestPrompt,
         assistantPrefix: reconstructAssistantPrefix({ ...graph, nodesById }, parentNodeId),
         model: options.model,

@@ -3,8 +3,11 @@ export interface ApiErrorDetail {
   message: string;
 }
 
+export type ContinuationMode = "exact" | "approximate";
+
 export interface AlternativeCandidate {
   node_id?: string | null;
+  segment_id?: string | null;
   token: string;
   display_token?: string | null;
   token_bytes?: number[] | null;
@@ -27,6 +30,7 @@ export interface AlternativeCandidate {
   finish_reason?: string | null;
   rationale?: string | null;
   generation_step?: number | null;
+  continuation_mode?: ContinuationMode | null;
   metadata?: Record<string, string | number | boolean | null> | null;
 }
 
@@ -52,6 +56,7 @@ export interface ModelCatalogResponse {
 
 export interface TokenTrace {
   id: string;
+  segment_id?: string | null;
   branch_id: string;
   parent_node_id?: string | null;
   model: string;
@@ -80,6 +85,7 @@ export interface TokenTrace {
   finish_reason?: string | null;
   alternatives: AlternativeCandidate[];
   generation_step?: number | null;
+  continuation_mode?: ContinuationMode | null;
   metadata?: Record<string, string | number | boolean | null> | null;
 }
 
@@ -141,7 +147,7 @@ export interface GenerationStats {
 }
 
 export interface ProviderCapabilitiesDetail {
-  supports_assistant_prefill: boolean;
+  supports_native_continuation: boolean;
   supports_token_logprobs: boolean;
   minimum_output_tokens: number;
 }
@@ -186,6 +192,7 @@ export interface ContinueGenerationRequest extends NodeExpansionRequest {
 
 export interface NodeExpansionCandidate {
   id: string;
+  segment_id?: string | null;
   branch_id: string;
   parent_node_id: string;
   model: string;
@@ -214,6 +221,7 @@ export interface NodeExpansionCandidate {
   finish_reason?: string | null;
   rationale?: string | null;
   generation_step?: number | null;
+  continuation_mode?: ContinuationMode | null;
   metadata?: Record<string, string | number | boolean | null> | null;
 }
 
@@ -228,7 +236,7 @@ export interface NodeExpansionResponse {
 
 export interface ContinueGenerationResponse extends NodeExpansionResponse {
   action: "reveal_cached" | "new_provider_segment";
-  continuation_mode: "cached_exact" | "native_prefill" | "approximate";
+  continuation_mode: ContinuationMode;
   provider_capabilities: ProviderCapabilitiesDetail;
   segment_id?: string | null;
   revealed_count: number;

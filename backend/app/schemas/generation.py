@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import Enum
 from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from app.models.provider import ModelProvider
+
+
+class ContinuationMode(str, Enum):
+    EXACT = "exact"
+    APPROXIMATE = "approximate"
 
 
 class ApiErrorDetail(BaseModel):
@@ -15,6 +21,7 @@ class ApiErrorDetail(BaseModel):
 
 class AlternativeCandidate(BaseModel):
     node_id: str | None = None
+    segment_id: str | None = Field(default=None, min_length=1)
     token: str
     display_token: str | None = None
     token_bytes: list[int] = Field(default_factory=list)
@@ -37,11 +44,13 @@ class AlternativeCandidate(BaseModel):
     finish_reason: str | None = None
     rationale: str | None = None
     generation_step: int | None = Field(default=None, ge=0)
+    continuation_mode: ContinuationMode | None = None
     metadata: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
 
 
 class TokenTrace(BaseModel):
     id: str
+    segment_id: str | None = Field(default=None, min_length=1)
     branch_id: str
     parent_node_id: str | None = None
     model: str
@@ -70,6 +79,7 @@ class TokenTrace(BaseModel):
     finish_reason: str | None = None
     alternatives: list[AlternativeCandidate] = Field(default_factory=list)
     generation_step: int = Field(..., ge=0)
+    continuation_mode: ContinuationMode = Field(default=ContinuationMode.EXACT)
     metadata: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
 
 
@@ -131,7 +141,7 @@ class GenerationStats(BaseModel):
 
 
 class ProviderCapabilitiesDetail(BaseModel):
-    supports_assistant_prefill: bool
+    supports_native_continuation: bool
     supports_token_logprobs: bool
     minimum_output_tokens: int = Field(..., ge=1)
 
@@ -212,6 +222,7 @@ class ContinueGenerationRequest(NodeExpansionRequest):
 
 class NodeExpansionCandidate(BaseModel):
     id: str
+    segment_id: str | None = Field(default=None, min_length=1)
     branch_id: str
     parent_node_id: str
     model: str
@@ -240,6 +251,7 @@ class NodeExpansionCandidate(BaseModel):
     finish_reason: str | None = None
     rationale: str | None = None
     generation_step: int = Field(..., ge=0)
+    continuation_mode: ContinuationMode = Field(default=ContinuationMode.EXACT)
     metadata: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
 
 
@@ -254,7 +266,7 @@ class NodeExpansionResponse(BaseModel):
 
 class ContinueGenerationResponse(NodeExpansionResponse):
     action: Literal["reveal_cached", "new_provider_segment"]
-    continuation_mode: Literal["cached_exact", "native_prefill", "approximate"]
+    continuation_mode: ContinuationMode
     provider_capabilities: ProviderCapabilitiesDetail
     segment_id: str | None = None
     revealed_count: int = Field(..., ge=0)

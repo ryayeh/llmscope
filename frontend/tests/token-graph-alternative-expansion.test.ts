@@ -8,7 +8,7 @@ import type {
   TokenGraphState,
 } from "../lib/token-graph";
 import { applyExpansionToTokenGraph, materializeSourceAlternativesForNode } from "../lib/token-graph";
-import type { NodeExpansionResponse } from "../types/api";
+import type { ContinuationMode, NodeExpansionResponse } from "../types/api";
 
 const encoder = new TextEncoder();
 const expansionOptions: ApplyExpansionOptions = {
@@ -38,6 +38,8 @@ function makeAlternative(args: {
   return {
     nodeId: args.nodeId,
     branchId: args.branchId,
+    continuationMode: "exact",
+    segmentId: "segment-main",
     rawToken: args.rawToken,
     displayToken: args.rawToken.trimStart(),
     decodedContribution: args.rawToken,
@@ -88,6 +90,8 @@ function makeNode(args: {
     childIds: args.childIds ?? [],
     generationId: "gen-main",
     branchId: args.branchId ?? args.id,
+    continuationMode: "exact",
+    segmentId: "segment-main",
     rawToken: args.rawToken,
     displayToken: args.displayToken ?? args.rawToken.trimStart(),
     decodedContribution: args.rawToken,
@@ -280,6 +284,8 @@ function makeExpansionResponse(
   children: Array<{
     id: string;
     branchId: string;
+    continuationMode?: ContinuationMode;
+    segmentId?: string | null;
     rawToken: string;
     generationStep: number;
     rank: number;
@@ -300,6 +306,7 @@ function makeExpansionResponse(
     notes: "continuation test",
     children: children.map((child) => ({
       id: child.id,
+      segment_id: child.segmentId ?? "segment-main",
       branch_id: child.branchId,
       parent_node_id: parentId,
       model: "demo-model",
@@ -330,6 +337,7 @@ function makeExpansionResponse(
       finish_reason: null,
       rationale: null,
       generation_step: child.generationStep,
+      continuation_mode: child.continuationMode ?? "exact",
       metadata: {
         parent_node_id: parentId,
         source: "demo",
@@ -513,5 +521,47 @@ test("continued branches stay isolated even when token text repeats", () => {
   );
   assert.ok(
     !materialized.nodesById["n2:3:competitive"].childIds.includes("n2:3:steady"),
+  );
+});
+
+test("continuation mode and segment id propagate through expansion records", () => {
+  const graph = createGraph();
+  const expanded = applyExpansionToTokenGraph(
+    graph,
+    "n2",
+    makeExpansionResponse(graph, "n2", "2026-08-06T10:00:02Z", [
+      {
+        id: "n2:3:approx",
+        branchId: "n2:3:approx",
+        segmentId: "segment-approx-1",
+        continuationMode: "approximate",
+        rawToken: " approx",
+        generationStep: 3,
+        rank: 1,
+        probability: 0.58,
+      },
+      {
+        id: "n2:3:exact-alt",
+        branchId: "n2:3:exact-alt",
+        segmentId: "segment-approx-1",
+        continuationMode: "approximate",
+        rawToken: " branch",
+        generationStep: 3,
+        rank: 2,
+        probability: 0.19,
+      },
+    ]),
+    expansionOptions,
+  );
+
+  assert.equal(expanded.nodesById["n2:3:approx"].continuationMode, "approximate");
+  assert.equal(expanded.nodesById["n2:3:approx"].segmentId, "segment-approx-1");
+  assert.equal(
+    expanded.nodesById["n2:3:approx"].sourceAlternatives[0]?.continuationMode,
+    "approximate",
+  );
+  assert.equal(
+    expanded.generationsById["2026-08-06T10:00:02Z:n2"]?.continuationMode,
+    "approximate",
   );
 });

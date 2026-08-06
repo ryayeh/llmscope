@@ -62,9 +62,14 @@ import {
   type TokenGraphNodeRecord,
   type TokenGraphState,
 } from "@/lib/token-graph";
+import {
+  getContinuationModePresentation,
+  isApproximateBoundary,
+} from "@/lib/continuation-mode";
 import type {
   AlternativeCandidate,
   ContinueGenerationResponse,
+  ContinuationMode,
   GenerationResponse,
   ModelCatalogResponse,
   ModelOption,
@@ -235,30 +240,6 @@ function readMetadataNumber(
   return typeof metadata?.[key] === "number" ? Number(metadata[key]) : null;
 }
 
-function readMetadataBoolean(
-  metadata: Record<string, string | number | boolean | null> | null | undefined,
-  key: string,
-) {
-  return typeof metadata?.[key] === "boolean" ? Boolean(metadata[key]) : null;
-}
-
-function getContinuationModePresentation(
-  metadata: Record<string, string | number | boolean | null> | null | undefined,
-) {
-  const explicitLabel = readMetadataString(metadata, "continuation_mode_label");
-  const explicitMode = readMetadataString(metadata, "continuation_mode");
-  const isExact =
-    readMetadataBoolean(metadata, "continuation_mode_is_exact") ??
-    (explicitMode ? explicitMode !== "approximate" : true);
-
-  return {
-    label: explicitLabel ?? (isExact ? "Exact" : "Approximate"),
-    mode: explicitMode ?? (isExact ? "cached_exact" : "approximate"),
-    title: readMetadataString(metadata, "continuation_mode_tooltip"),
-    tone: isExact ? ("exact" as const) : ("approximate" as const),
-  };
-}
-
 function getProbabilityModeLabel(mode: ProbabilityViewMode) {
   return mode === "normalized" ? "Normalized Top-K" : "Raw";
 }
@@ -426,6 +407,8 @@ function mapTraceAlternativesToInspector(alternatives: AlternativeCandidate[]) {
     branchId:
       typeof candidate.metadata?.branch_id === "string" ? candidate.metadata.branch_id : null,
     predictionId: candidate.node_id ?? null,
+    segmentId: candidate.segment_id ?? null,
+    continuationMode: candidate.continuation_mode ?? "exact",
     tokenIndex: candidate.generation_step ?? null,
     token: candidate.token,
     displayToken: candidate.display_token ?? null,
@@ -466,6 +449,8 @@ function mapGraphAlternativeToInspector(
   return {
     branchId: alternative.branchId,
     predictionId: alternative.nodeId,
+    segmentId: alternative.segmentId,
+    continuationMode: alternative.continuationMode,
     tokenIndex: alternative.generationStep,
     token: alternative.rawToken,
     displayToken: alternative.displayToken,
@@ -505,6 +490,8 @@ function applyTokenGraphRecordToFlowNode(
       kind: record.kind,
       generationId: record.generationId,
       predictionId: record.id,
+      segmentId: record.segmentId,
+      continuationMode: record.continuationMode,
       tokenIndex: record.generationStep,
       branchId: record.branchId,
       tokenText: record.rawToken,
@@ -606,6 +593,8 @@ function buildPromptNode({
       kind: "prompt",
       generationId: "root",
       predictionId: "root",
+      segmentId: null,
+      continuationMode: "exact",
       tokenIndex: -1,
       branchId: "root",
       tokenText: prompt,
@@ -678,6 +667,7 @@ function buildPromptNode({
 
 function buildTokenNode({
   branchRationale,
+  continuationMode,
   cumulativeProbability,
   depth,
   entropy,
@@ -686,6 +676,7 @@ function buildTokenNode({
   latency,
   logProbability,
   model,
+  segmentId,
   parentId,
   position,
   preset,
@@ -720,6 +711,7 @@ function buildTokenNode({
   metadata,
 }: {
   branchRationale: string | null;
+  continuationMode: ContinuationMode;
   cumulativeProbability: number;
   depth: number;
   entropy: number;
@@ -728,6 +720,7 @@ function buildTokenNode({
   latency: number;
   logProbability: number;
   model: string;
+  segmentId: string | null;
   parentId: string;
   position: { x: number; y: number };
   preset: string;
@@ -781,6 +774,8 @@ function buildTokenNode({
       kind: "token",
       generationId: `${model}:${variation}:${id}`,
       predictionId: id,
+      segmentId,
+      continuationMode,
       tokenIndex: generationStep ?? Math.max(depth - 1, 0),
       branchId: String(metadata?.branch_id ?? id),
       tokenText: token,
@@ -870,6 +865,8 @@ function buildEdge(
       probabilityCoverage: probability,
       remainingProbabilityMass: Math.max(0, 1 - probability),
       probabilityMode: "normalized",
+      continuationMode: "exact",
+      isModeBoundary: false,
       isMainPath,
       isActiveReality: false,
       isDimmed: false,
@@ -918,6 +915,8 @@ function buildFlowNodeFromRecord(
     depth: record.generationDepth,
     rank: record.rank,
     parentId: record.parentId ?? "root",
+    continuationMode: record.continuationMode,
+    segmentId: record.segmentId,
     position: initialPosition,
     prompt: record.requestPrompt,
     model: record.requestModel,
@@ -947,6 +946,8 @@ function ensureProbabilityEdgeData(data?: ProbabilityFlowEdge["data"]) {
     remainingProbabilityMass:
       data?.remainingProbabilityMass ?? Math.max(0, 1 - (data?.probability ?? 0.5)),
     probabilityMode: data?.probabilityMode ?? "normalized",
+    continuationMode: data?.continuationMode ?? "exact",
+    isModeBoundary: data?.isModeBoundary ?? false,
     isMainPath: data?.isMainPath ?? false,
     isActiveReality: data?.isActiveReality ?? false,
     isDimmed: data?.isDimmed ?? false,
@@ -1567,6 +1568,8 @@ function buildInspectorAlternatives(
     {
       branchId: node.branchId,
       predictionId: node.id,
+      segmentId: node.segmentId,
+      continuationMode: node.continuationMode,
       tokenIndex: node.generationStep,
       token: node.rawToken,
       displayToken: node.displayToken,
@@ -2004,6 +2007,11 @@ function Workspace() {
             remainingProbabilityMass:
               targetNode?.data.remainingProbabilityMass ?? edgeData.remainingProbabilityMass,
             probabilityMode: targetNode?.data.probabilityMode ?? probabilityViewMode,
+            continuationMode: targetNode?.data.continuationMode ?? edgeData.continuationMode,
+            isModeBoundary: isApproximateBoundary(
+              sourceNode?.data.continuationMode,
+              targetNode?.data.continuationMode,
+            ),
             isActiveReality: activeEdgeIdSet.has(edge.id),
             isDimmed: sourceDimmed || targetDimmed,
             isFocused: hoveredNodeId
@@ -2098,14 +2106,23 @@ function Workspace() {
   );
   const currentRealityContinuationMode = useMemo(
     () =>
-      getContinuationModePresentation(
-        activeSentenceNodes[activeSentenceNodes.length - 1]?.data.metadata ?? selectedNode?.data.metadata,
-      ),
-    [activeSentenceNodes, selectedNode?.data.metadata],
+      getContinuationModePresentation({
+        continuationMode:
+          activeSentenceNodes[activeSentenceNodes.length - 1]?.data.continuationMode ??
+          selectedNode?.data.continuationMode,
+        metadata:
+          activeSentenceNodes[activeSentenceNodes.length - 1]?.data.metadata ??
+          selectedNode?.data.metadata,
+      }),
+    [activeSentenceNodes, selectedNode?.data.continuationMode, selectedNode?.data.metadata],
   );
   const inspectorContinuationMode = useMemo(
-    () => getContinuationModePresentation(selectedNode?.data.metadata ?? null),
-    [selectedNode?.data.metadata],
+    () =>
+      getContinuationModePresentation({
+        continuationMode: selectedNode?.data.continuationMode,
+        metadata: selectedNode?.data.metadata ?? null,
+      }),
+    [selectedNode?.data.continuationMode, selectedNode?.data.metadata],
   );
   const compareNodes = [
     compareLeftId ? displayNodeMap.get(compareLeftId) ?? null : null,
@@ -2675,6 +2692,8 @@ function Workspace() {
         tokenId: trace.token_id ?? null,
         tokenizerId: trace.tokenizer_id ?? null,
         displayToken: trace.display_token,
+        segmentId: trace.segment_id ?? null,
+        continuationMode: trace.continuation_mode ?? "exact",
         decodedContribution: trace.decoded_contribution ?? trace.token,
         cumulativeDecodedText:
           trace.cumulative_decoded_text ?? trace.context_after ?? trace.text_preview,
@@ -2854,6 +2873,8 @@ function Workspace() {
             latency: candidate.latency_ms,
             tokenId: candidate.token_id ?? null,
             tokenizerId: candidate.tokenizer_id ?? null,
+            segmentId: candidate.segment_id ?? matchingChild.data.segmentId,
+            continuationMode: candidate.continuation_mode ?? matchingChild.data.continuationMode,
             displayTokenText: candidate.display_token,
             cumulativeProbability: candidate.cumulative_probability,
             rank: candidate.rank,
@@ -2874,6 +2895,8 @@ function Workspace() {
             tokenId: candidate.token_id ?? null,
             tokenizerId: candidate.tokenizer_id ?? null,
             displayToken: candidate.display_token,
+            segmentId: candidate.segment_id ?? null,
+            continuationMode: candidate.continuation_mode ?? "exact",
             decodedContribution: candidate.decoded_contribution ?? candidate.token,
             cumulativeDecodedText:
               candidate.cumulative_decoded_text ?? candidate.context_after ?? candidate.text_preview,
@@ -4589,6 +4612,10 @@ function Workspace() {
                   <div>
                     <dt>Generation step</dt>
                     <dd>{selectedRecord.generationStep}</dd>
+                  </div>
+                  <div>
+                    <dt>Segment id</dt>
+                    <dd>{selectedRecord.segmentId ?? "-"}</dd>
                   </div>
                   <div>
                     <dt>UTF-8 length</dt>

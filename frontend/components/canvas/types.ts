@@ -1,10 +1,14 @@
 import type { Edge, Node } from "@xyflow/react";
 
+import type { ContinuationMode } from "@/types/api";
+
 export type ProbabilityViewMode = "normalized" | "raw";
 
 export interface InspectorAlternative {
   branchId: string | null;
   predictionId: string | null;
+  segmentId: string | null;
+  continuationMode: ContinuationMode;
   tokenIndex: number | null;
   token: string;
   displayToken: string | null;
@@ -34,6 +38,8 @@ export interface TokenNodeData extends Record<string, unknown> {
   kind: "prompt" | "token";
   generationId: string;
   predictionId: string;
+  segmentId: string | null;
+  continuationMode: ContinuationMode;
   tokenIndex: number;
   branchId: string;
   tokenText: string;
@@ -109,6 +115,8 @@ export interface ProbabilityEdgeData extends Record<string, unknown> {
   probabilityCoverage: number;
   remainingProbabilityMass: number;
   probabilityMode: ProbabilityViewMode;
+  continuationMode: ContinuationMode;
+  isModeBoundary: boolean;
   isMainPath: boolean;
   isActiveReality: boolean;
   isDimmed: boolean;

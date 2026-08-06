@@ -13,6 +13,8 @@ from app.core.errors import LLMScopeError
 from app.schemas.generation import (
     AlternativeCandidate,
     ContinueGenerationRequest,
+    ContinuationMode,
+    GenerationRequest,
     NodeExpansionRequest,
     TokenTrace,
 )
@@ -304,7 +306,29 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "TOP_LOGPROBS_UNAVAILABLE")
         self.assertIn("did not include token alternatives", caught.exception.message)
 
-    def test_continue_generation_requests_use_assistant_prefill_payload_and_cache_remaining_tokens(self) -> None:
+    def test_initial_generation_tokens_are_tagged_exact(self) -> None:
+        response = self.service.build_response(
+            GenerationRequest(
+                prompt="What is a good 400m time for a 16-year-old?",
+                demo_mode=True,
+            )
+        )
+
+        self.assertGreater(len(response.tokens), 0)
+        segment_ids = {token.segment_id for token in response.tokens}
+        self.assertEqual(len(segment_ids), 1)
+        self.assertNotIn(None, segment_ids)
+        shared_segment_id = next(iter(segment_ids))
+
+        for token in response.tokens:
+            self.assertEqual(token.continuation_mode, ContinuationMode.EXACT)
+            self.assertEqual(token.segment_id, shared_segment_id)
+            self.assertEqual(token.metadata.get("continuation_mode"), ContinuationMode.EXACT.value)
+            for alternative in token.alternatives:
+                self.assertEqual(alternative.continuation_mode, ContinuationMode.EXACT)
+                self.assertEqual(alternative.segment_id, shared_segment_id)
+
+    def test_continue_generation_requests_use_exact_continuation_payload_and_cache_remaining_tokens(self) -> None:
         captured: dict[str, object] = {}
 
         class FakeResponses:
@@ -350,7 +374,7 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
                 self.service,
                 "_provider_capabilities_for_model",
                 return_value=ProviderCapabilities(
-                    supports_assistant_prefill=True,
+                    supports_native_continuation=True,
                     supports_token_logprobs=True,
                     minimum_output_tokens=16,
                 ),
@@ -385,11 +409,13 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
         self.assertNotIn("Be accurate, direct, and useful.", instructions)
         self.assertNotIn("If the user asks for a benchmark", instructions)
         self.assertEqual(response.action, "new_provider_segment")
-        self.assertEqual(response.continuation_mode, "native_prefill")
+        self.assertEqual(response.continuation_mode, ContinuationMode.EXACT)
         self.assertEqual(response.children[0].token, " old")
         self.assertEqual(response.cached_token_count, 2)
         self.assertEqual(response.remaining_cached_tokens, 1)
         self.assertIsNotNone(response.segment_id)
+        self.assertEqual(response.children[0].continuation_mode, ContinuationMode.EXACT)
+        self.assertEqual(response.children[0].segment_id, response.segment_id)
         self.assertEqual(
             response.children[0].metadata.get("next_cached_token_index"),
             1,
@@ -469,7 +495,7 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
                 self.service,
                 "_provider_capabilities_for_model",
                 return_value=ProviderCapabilities(
-                    supports_assistant_prefill=True,
+                    supports_native_continuation=True,
                     supports_token_logprobs=True,
                     minimum_output_tokens=16,
                 ),
@@ -503,8 +529,10 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
             )
             self.assertEqual(provider_call_count, 1)
             self.assertEqual(second.action, "reveal_cached")
-            self.assertEqual(second.continuation_mode, "cached_exact")
+            self.assertEqual(second.continuation_mode, ContinuationMode.EXACT)
             self.assertEqual(second.children[0].token, " good")
+            self.assertEqual(second.children[0].continuation_mode, ContinuationMode.EXACT)
+            self.assertEqual(second.children[0].segment_id, first.segment_id)
             chosen_second = second.children[0]
             third = self.service.continue_node(
                 ContinueGenerationRequest(
@@ -519,7 +547,7 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
                 )
             )
             self.assertEqual(provider_call_count, 1)
-            self.assertEqual(third.continuation_mode, "cached_exact")
+            self.assertEqual(third.continuation_mode, ContinuationMode.EXACT)
             self.assertEqual(third.children[0].token, " time")
             alternative_first = first.children[1]
             alternative_request = ContinueGenerationRequest(
@@ -534,7 +562,7 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
 
         self.assertEqual(provider_call_count, 2)
         self.assertEqual(branch_response.action, "new_provider_segment")
-        self.assertEqual(branch_response.continuation_mode, "native_prefill")
+        self.assertEqual(branch_response.continuation_mode, ContinuationMode.EXACT)
         self.assertEqual(branch_response.children[0].token, " alternative")
 
     def test_continue_generation_falls_back_to_approximate_and_recaches_after_exhaustion(self) -> None:
@@ -615,7 +643,7 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
                 self.service,
                 "_provider_capabilities_for_model",
                 return_value=ProviderCapabilities(
-                    supports_assistant_prefill=False,
+                    supports_native_continuation=False,
                     supports_token_logprobs=True,
                     minimum_output_tokens=16,
                 ),
@@ -634,33 +662,19 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
             )
             first = self.service.continue_node(request)
             self.assertEqual(provider_call_count, 1)
-            self.assertEqual(first.continuation_mode, "approximate")
+            self.assertEqual(first.continuation_mode, ContinuationMode.APPROXIMATE)
             self.assertEqual(first.children[0].token, " is")
             self.assertEqual(first.cached_token_count, 3)
             self.assertEqual(first.remaining_cached_tokens, 2)
+            self.assertEqual(first.children[0].continuation_mode, ContinuationMode.APPROXIMATE)
+            self.assertEqual(first.children[0].segment_id, first.segment_id)
+            _, expected_approximate_request = self.service._build_approximate_continuation_request(
+                prompt="Prompt",
+                assistant_prefix="A good 400m time for a 16-year-old boy",
+            )
             self.assertEqual(
                 captured_inputs[0],
-                [
-                    {
-                        "role": "user",
-                        "content": "\n\n".join(
-                            [
-                                "Continue the unfinished assistant response below.",
-                                "Return ONLY the text immediately following the final character.",
-                                "\n".join(
-                                    [
-                                        "Do not repeat the existing response.",
-                                        "Do not restart the answer.",
-                                        "Do not introduce yourself.",
-                                        "Do not add explanations.",
-                                    ]
-                                ),
-                                "Original user request:\nPrompt",
-                                "Current assistant response:\nA good 400m time for a 16-year-old boy",
-                            ]
-                        ),
-                    }
-                ],
+                expected_approximate_request.input_items,
             )
             self.assertEqual(
                 first.children[0].metadata.get("continuation_mode_label"),
@@ -682,7 +696,7 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
                 )
             )
             self.assertEqual(provider_call_count, 1)
-            self.assertEqual(second.continuation_mode, "approximate")
+            self.assertEqual(second.continuation_mode, ContinuationMode.APPROXIMATE)
             self.assertEqual(second.children[0].token, " around")
 
             chosen_second = second.children[0]
@@ -715,7 +729,7 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
                 )
             )
             self.assertEqual(provider_call_count, 2)
-            self.assertEqual(fourth.continuation_mode, "approximate")
+            self.assertEqual(fourth.continuation_mode, ContinuationMode.APPROXIMATE)
             self.assertEqual(fourth.children[0].token, " seconds")
 
             alternative_first = first.children[1]
@@ -731,7 +745,7 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
             )
 
         self.assertEqual(provider_call_count, 3)
-        self.assertEqual(branch_response.continuation_mode, "approximate")
+        self.assertEqual(branch_response.continuation_mode, ContinuationMode.APPROXIMATE)
         self.assertEqual(branch_response.children[0].token, " branch")
 
 
