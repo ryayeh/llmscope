@@ -4,6 +4,8 @@ export type ProbabilityViewMode = "normalized" | "raw";
 
 export interface InspectorAlternative {
   branchId: string | null;
+  predictionId: string | null;
+  tokenIndex: number | null;
   token: string;
   displayToken: string | null;
   tokenBytes: number[];
@@ -31,6 +33,8 @@ export interface InspectorAlternative {
 export interface TokenNodeData extends Record<string, unknown> {
   kind: "prompt" | "token";
   generationId: string;
+  predictionId: string;
+  tokenIndex: number;
   branchId: string;
   tokenText: string;
   displayTokenText: string;
@@ -68,6 +72,7 @@ export interface TokenNodeData extends Record<string, unknown> {
   parentId: string | null;
   isMainPath: boolean;
   isCollapsed: boolean;
+  alternativesExpanded: boolean;
   distributionRequested: boolean;
   childCount: number;
   status: "idle" | "loading" | "ready";
@@ -86,6 +91,7 @@ export interface TokenNodeData extends Record<string, unknown> {
   branchRationale: string | null;
   metadata: Record<string, string | number | boolean | null>;
   rawLogits: number[] | null;
+  topAlternatives: InspectorAlternative[];
   sourceAlternatives: InspectorAlternative[];
   distributionMessage: string | null;
   isSearchMatch: boolean;

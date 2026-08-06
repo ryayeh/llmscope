@@ -4,7 +4,7 @@ import type {
   NodeExpansionCandidate,
   NodeExpansionResponse,
   TokenTrace,
-} from "@/types/api";
+} from "../types/api";
 
 export interface TokenGraphAlternativeRecord {
   nodeId: string | null;
@@ -80,6 +80,7 @@ export interface TokenGraphNodeRecord {
   branchRationale: string | null;
   metadata: Record<string, string | number | boolean | null>;
   sourceAlternatives: TokenGraphAlternativeRecord[];
+  alternativesExpanded: boolean;
   distributionRequested: boolean;
   distributionMessage: string | null;
 }
@@ -256,6 +257,157 @@ function normalizeMetadata(
   return metadata ? { ...metadata } : {};
 }
 
+function encodeTokenFragment(token: string) {
+  const bytes = normalizeTokenBytes(token);
+  return bytes
+    .slice(0, 12)
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function buildFallbackPredictionId(
+  generationId: string,
+  parentId: string,
+  tokenIndex: number,
+  token: string,
+  tokenId: number | null,
+  rank: number | null,
+) {
+  return [
+    "token",
+    generationId,
+    parentId,
+    String(tokenIndex),
+    String(tokenId ?? "na"),
+    String(rank ?? "na"),
+    encodeTokenFragment(token) || "empty",
+  ].join("-");
+}
+
+function toAlternativeRecord(node: TokenGraphNodeRecord): TokenGraphAlternativeRecord {
+  return {
+    nodeId: node.id,
+    branchId: node.branchId,
+    rawToken: node.rawToken,
+    displayToken: node.displayToken,
+    decodedContribution: node.decodedContribution,
+    cumulativeDecodedText: node.cumulativeDecodedText,
+    cumulativeRawText: node.cumulativeRawText,
+    cumulativeTokenIds: node.cumulativeTokenIds,
+    cumulativeLogProbability: node.cumulativeLogProbability,
+    generationStep: node.generationStep,
+    tokenBytes: [...node.tokenBytes],
+    tokenId: node.tokenId,
+    tokenizerId: node.tokenizerId,
+    probability: node.probability,
+    rawProbability: node.rawProbability,
+    normalizedDisplayedProbability: node.normalizedDisplayedProbability,
+    logProbability: node.logProbability,
+    entropy: node.entropy,
+    latencyMs: node.latencyMs,
+    rank: node.rank,
+    contextBefore: node.contextBefore,
+    contextAfter: node.contextAfter,
+    finishReason: node.finishReason,
+    rationale: node.branchRationale,
+    metadata: normalizeMetadata(node.metadata),
+  };
+}
+
+function buildSiblingAlternativeNode(
+  selectedNode: TokenGraphNodeRecord,
+  parentNode: TokenGraphNodeRecord,
+  alternative: TokenGraphAlternativeRecord,
+  alternativeIndex: number,
+  existing: TokenGraphNodeRecord | null,
+): TokenGraphNodeRecord {
+  const predictionId =
+    alternative.nodeId ??
+    buildFallbackPredictionId(
+      selectedNode.generationId,
+      parentNode.id,
+      alternative.generationStep ?? selectedNode.generationStep,
+      alternative.rawToken,
+      alternative.tokenId,
+      alternative.rank ?? alternativeIndex + 2,
+    );
+  const rawProbability = alternative.rawProbability ?? alternative.probability;
+  const logProbability =
+    alternative.logProbability ?? Math.log(Math.max(rawProbability, MIN_GRAPH_PROBABILITY));
+  const decodedContribution = alternative.decodedContribution ?? alternative.rawToken;
+  const cumulativeDecodedText =
+    alternative.cumulativeDecodedText ??
+    `${parentNode.cumulativeDecodedText}${decodedContribution}`;
+  const cumulativeRawText =
+    alternative.cumulativeRawText ?? `${parentNode.cumulativeRawText}${alternative.rawToken}`;
+  const contextAfter = alternative.contextAfter ?? cumulativeDecodedText;
+  const tokenIndex = alternative.generationStep ?? selectedNode.generationStep;
+  const candidateRank = alternative.rank ?? alternativeIndex + 2;
+  const cumulativeProbability = Number(
+    Math.max(
+      MIN_GRAPH_PROBABILITY,
+      Math.min(1, parentNode.cumulativeProbability * rawProbability),
+    ).toFixed(6),
+  );
+
+  return {
+    id: predictionId,
+    kind: "token",
+    parentId: parentNode.id,
+    childIds: existing?.childIds ?? [],
+    generationId: existing?.generationId ?? selectedNode.generationId,
+    branchId:
+      alternative.branchId ??
+      existing?.branchId ??
+      `${selectedNode.branchId}:alt:${tokenIndex}:${candidateRank}`,
+    rawToken: alternative.rawToken,
+    displayToken: alternative.displayToken,
+    decodedContribution,
+    cumulativeDecodedText,
+    cumulativeRawText,
+    cumulativeTokenIds: alternative.cumulativeTokenIds,
+    cumulativeLogProbability:
+      alternative.cumulativeLogProbability ??
+      resolveCumulativeLogProbability(parentNode, logProbability, null),
+    tokenBytes: [...alternative.tokenBytes],
+    tokenId: alternative.tokenId,
+    tokenizerId: alternative.tokenizerId,
+    logProbability,
+    probability: alternative.probability,
+    rawProbability,
+    normalizedDisplayedProbability:
+      alternative.normalizedDisplayedProbability ?? rawProbability,
+    rank: candidateRank,
+    entropy: alternative.entropy ?? selectedNode.entropy,
+    latencyMs: alternative.latencyMs ?? selectedNode.latencyMs,
+    cumulativeProbability,
+    branchProbability: rawProbability,
+    finishReason: alternative.finishReason,
+    generationDepth: selectedNode.generationDepth,
+    generationStep: tokenIndex,
+    contextBefore: alternative.contextBefore ?? selectedNode.contextBefore,
+    contextAfter,
+    requestPrompt: selectedNode.requestPrompt,
+    requestModel: selectedNode.requestModel,
+    requestPreset: selectedNode.requestPreset,
+    requestTemperature: selectedNode.requestTemperature,
+    requestTopP: selectedNode.requestTopP,
+    requestVariation: selectedNode.requestVariation,
+    requestDemoMode: selectedNode.requestDemoMode,
+    responseMode: selectedNode.responseMode,
+    sourceNotes: selectedNode.sourceNotes,
+    reasoningIntent: selectedNode.reasoningIntent,
+    reasoningStrategy: selectedNode.reasoningStrategy,
+    reasoningFocusTerms: selectedNode.reasoningFocusTerms,
+    branchRationale: alternative.rationale ?? null,
+    metadata: normalizeMetadata(alternative.metadata),
+    sourceAlternatives: [],
+    alternativesExpanded: true,
+    distributionRequested: existing?.distributionRequested ?? false,
+    distributionMessage: null,
+  };
+}
+
 function mapAlternativeCandidate(
   candidate: AlternativeCandidate,
   parentNode: TokenGraphNodeRecord,
@@ -384,6 +536,7 @@ function buildInitialTokenNode(
     sourceAlternatives: trace.alternatives.map((candidate) =>
       mapAlternativeCandidate(candidate, parentNode),
     ),
+    alternativesExpanded: false,
     distributionRequested: false,
     distributionMessage: null,
   };
@@ -460,6 +613,7 @@ function buildExpansionNode(
     branchRationale: candidate.rationale ?? null,
     metadata: normalizeMetadata(candidate.metadata ?? null),
     sourceAlternatives: [],
+    alternativesExpanded: false,
     distributionRequested: false,
     distributionMessage: null,
   };
@@ -527,6 +681,7 @@ export function createTokenGraphFromGeneration(payload: GenerationResponse): Tok
       branch_id: "root",
     },
     sourceAlternatives: [],
+    alternativesExpanded: false,
     distributionRequested: false,
     distributionMessage: null,
   };
@@ -605,6 +760,7 @@ export function applyExpansionToTokenGraph(
   nodesById[parentNodeId] = {
     ...parentNode,
     childIds: nextChildIds,
+    alternativesExpanded: parentNode.alternativesExpanded,
     distributionRequested: true,
     distributionMessage: null,
   };
@@ -624,6 +780,19 @@ export function applyExpansionToTokenGraph(
       nodesById[candidate.id] = nextNode;
       addedNodeIds.push(candidate.id);
     }
+  }
+
+  const orderedExpansionNodes = payload.children
+    .map((candidate) => nodesById[candidate.id])
+    .filter((candidate): candidate is TokenGraphNodeRecord => Boolean(candidate));
+
+  for (const child of orderedExpansionNodes) {
+    nodesById[child.id] = {
+      ...nodesById[child.id],
+      sourceAlternatives: orderedExpansionNodes
+        .filter((candidate) => candidate.id !== child.id)
+        .map(toAlternativeRecord),
+    };
   }
 
   return {
@@ -658,6 +827,117 @@ export function applyExpansionToTokenGraph(
   };
 }
 
+export function materializeSourceAlternativesForNode(
+  graph: TokenGraphState,
+  nodeId: string,
+): TokenGraphState {
+  const selectedNode = graph.nodesById[nodeId];
+
+  if (
+    !selectedNode ||
+    selectedNode.kind !== "token" ||
+    !selectedNode.parentId ||
+    selectedNode.sourceAlternatives.length === 0
+  ) {
+    return graph;
+  }
+
+  const parentNode = graph.nodesById[selectedNode.parentId];
+
+  if (!parentNode) {
+    return graph;
+  }
+
+  const nodesById: Record<string, TokenGraphNodeRecord> = {
+    ...graph.nodesById,
+  };
+  const selectedUpdated: TokenGraphNodeRecord = {
+    ...selectedNode,
+    alternativesExpanded: true,
+    distributionRequested: selectedNode.distributionRequested,
+    distributionMessage: null,
+    sourceAlternatives: [],
+  };
+  const siblingNodes: TokenGraphNodeRecord[] = [selectedUpdated];
+
+  for (let index = 0; index < selectedNode.sourceAlternatives.length; index += 1) {
+    const alternative = selectedNode.sourceAlternatives[index];
+    const alternativeId =
+      alternative.nodeId ??
+      buildFallbackPredictionId(
+        selectedNode.generationId,
+        parentNode.id,
+        alternative.generationStep ?? selectedNode.generationStep,
+        alternative.rawToken,
+        alternative.tokenId,
+        alternative.rank ?? index + 2,
+      );
+    const existing = nodesById[alternativeId] ?? null;
+
+    siblingNodes.push(
+      buildSiblingAlternativeNode(
+        selectedNode,
+        parentNode,
+        alternative,
+        index,
+        existing,
+      ),
+    );
+  }
+
+  const orderedSiblings = siblingNodes.slice().sort((left, right) => {
+    if (left.rank !== right.rank) {
+      return left.rank - right.rank;
+    }
+
+    return left.id.localeCompare(right.id);
+  });
+  const siblingLookup = new Map(orderedSiblings.map((node) => [node.id, node]));
+
+  for (const sibling of orderedSiblings) {
+    const existing = nodesById[sibling.id];
+    const nextSibling = {
+      ...sibling,
+      generationId: existing?.generationId ?? sibling.generationId,
+      childIds: existing?.childIds ?? sibling.childIds,
+      sourceAlternatives: orderedSiblings
+        .filter((candidate) => candidate.id !== sibling.id)
+        .map(toAlternativeRecord),
+      alternativesExpanded: true,
+      distributionRequested: existing?.distributionRequested ?? sibling.distributionRequested,
+      distributionMessage: null,
+    };
+
+    nodesById[sibling.id] = nextSibling;
+    siblingLookup.set(sibling.id, nextSibling);
+  }
+
+  const nextChildIds = orderedSiblings.map((node) => node.id);
+
+  nodesById[parentNode.id] = {
+    ...parentNode,
+    childIds: nextChildIds,
+  };
+
+  if (!selectedNode.sourceAlternatives.some((alternative) => alternative.nodeId === selectedNode.id)) {
+    const selectedSibling = siblingLookup.get(selectedNode.id);
+
+    if (selectedSibling) {
+      nodesById[selectedNode.id] = {
+        ...selectedSibling,
+        sourceAlternatives: orderedSiblings
+          .filter((candidate) => candidate.id !== selectedNode.id)
+          .map(toAlternativeRecord),
+      };
+    }
+  }
+
+  return {
+    ...graph,
+    nodesById,
+  };
+}
+
 export function markTokenGraphNodeDistributionMessage(
   graph: TokenGraphState,
   nodeId: string,
@@ -675,6 +955,7 @@ export function markTokenGraphNodeDistributionMessage(
       ...graph.nodesById,
       [nodeId]: {
         ...node,
+        alternativesExpanded: node.alternativesExpanded,
         distributionRequested: true,
         sourceAlternatives: [],
         distributionMessage: message,

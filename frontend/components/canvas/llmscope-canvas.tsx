@@ -56,6 +56,7 @@ import {
   getGenerationLineage,
   getNodeMetrics,
   markTokenGraphNodeDistributionMessage,
+  materializeSourceAlternativesForNode,
   reconstructAssistantPrefix,
   type TokenGraphAlternativeRecord,
   type TokenGraphNodeRecord,
@@ -376,6 +377,8 @@ function mapTraceAlternativesToInspector(alternatives: AlternativeCandidate[]) {
   return alternatives.map<InspectorAlternative>((candidate) => ({
     branchId:
       typeof candidate.metadata?.branch_id === "string" ? candidate.metadata.branch_id : null,
+    predictionId: candidate.node_id ?? null,
+    tokenIndex: candidate.generation_step ?? null,
     token: candidate.token,
     displayToken: candidate.display_token ?? null,
     tokenBytes: candidate.token_bytes ?? [],
@@ -414,6 +417,8 @@ function mapGraphAlternativeToInspector(
 ): InspectorAlternative {
   return {
     branchId: alternative.branchId,
+    predictionId: alternative.nodeId,
+    tokenIndex: alternative.generationStep,
     token: alternative.rawToken,
     displayToken: alternative.displayToken,
     tokenBytes: alternative.tokenBytes,
@@ -451,6 +456,8 @@ function applyTokenGraphRecordToFlowNode(
       ...node.data,
       kind: record.kind,
       generationId: record.generationId,
+      predictionId: record.id,
+      tokenIndex: record.generationStep,
       branchId: record.branchId,
       tokenText: record.rawToken,
       displayTokenText: record.displayToken,
@@ -497,7 +504,9 @@ function applyTokenGraphRecordToFlowNode(
       reasoningFocusTerms: record.reasoningFocusTerms,
       branchRationale: record.branchRationale,
       metadata: record.metadata,
+      topAlternatives: record.sourceAlternatives.map(mapGraphAlternativeToInspector),
       sourceAlternatives: record.sourceAlternatives.map(mapGraphAlternativeToInspector),
+      alternativesExpanded: record.alternativesExpanded,
       distributionRequested: record.distributionRequested,
       distributionMessage: record.distributionMessage,
     },
@@ -548,6 +557,8 @@ function buildPromptNode({
     data: {
       kind: "prompt",
       generationId: "root",
+      predictionId: "root",
+      tokenIndex: -1,
       branchId: "root",
       tokenText: prompt,
       displayTokenText: prompt,
@@ -585,6 +596,7 @@ function buildPromptNode({
       parentId: null,
       isMainPath: true,
       isCollapsed: false,
+      alternativesExpanded: false,
       distributionRequested: false,
       childCount: 0,
       status,
@@ -603,6 +615,7 @@ function buildPromptNode({
       branchRationale: null,
       metadata: {},
       rawLogits: null,
+      topAlternatives: [],
       sourceAlternatives: [],
       distributionMessage: null,
       isSearchMatch: false,
@@ -636,6 +649,7 @@ function buildTokenNode({
   rawLogits,
   reasoning,
   responseMode,
+  topAlternatives,
   sourceAlternatives,
   status,
   temperature,
@@ -677,6 +691,7 @@ function buildTokenNode({
   rawLogits: number[] | null;
   reasoning: ReasoningBundle;
   responseMode: string;
+  topAlternatives?: InspectorAlternative[];
   sourceAlternatives: InspectorAlternative[];
   status: TokenNodeData["status"];
   temperature: number;
@@ -717,6 +732,8 @@ function buildTokenNode({
     data: {
       kind: "token",
       generationId: `${model}:${variation}:${id}`,
+      predictionId: id,
+      tokenIndex: generationStep ?? Math.max(depth - 1, 0),
       branchId: String(metadata?.branch_id ?? id),
       tokenText: token,
       displayTokenText: displayToken,
@@ -754,6 +771,7 @@ function buildTokenNode({
       parentId,
       isMainPath,
       isCollapsed: false,
+      alternativesExpanded: false,
       distributionRequested: false,
       childCount: 0,
       status,
@@ -772,6 +790,7 @@ function buildTokenNode({
       branchRationale,
       metadata: metadata ?? {},
       rawLogits,
+      topAlternatives: topAlternatives ?? sourceAlternatives,
       sourceAlternatives,
       distributionMessage: null,
       isSearchMatch: false,
@@ -809,6 +828,67 @@ function buildEdge(
       isFocused: false,
     },
   };
+}
+
+function buildFlowNodeFromRecord(
+  record: TokenGraphNodeRecord,
+  parentNode: TokenFlowNode | null,
+): TokenFlowNode {
+  const reasoning: ReasoningBundle = {
+    notes: record.sourceNotes,
+    intent: record.reasoningIntent,
+    strategy: record.reasoningStrategy,
+    focusTerms: record.reasoningFocusTerms,
+  };
+  const parentPosition = parentNode?.position ?? { x: 0, y: 0 };
+  const initialPosition = {
+    x: parentPosition.x + HORIZONTAL_GAP,
+    y: parentPosition.y + branchOffset(record.rank) * VERTICAL_GAP,
+  };
+
+  return buildTokenNode({
+    id: record.id,
+    token: record.rawToken,
+    displayToken: record.displayToken,
+    decodedContribution: record.decodedContribution,
+    cumulativeDecodedText: record.cumulativeDecodedText,
+    cumulativeRawText: record.cumulativeRawText,
+    cumulativeTokenIds: record.cumulativeTokenIds,
+    cumulativeLogProbability: record.cumulativeLogProbability,
+    contextBefore: record.contextBefore,
+    contextAfter: record.contextAfter,
+    generationStep: record.generationStep,
+    tokenId: record.tokenId,
+    tokenizerId: record.tokenizerId,
+    probability: record.probability,
+    rawProbability: record.rawProbability,
+    normalizedDisplayedProbability: record.normalizedDisplayedProbability,
+    logProbability: record.logProbability,
+    entropy: record.entropy,
+    cumulativeProbability: record.cumulativeProbability,
+    latency: record.latencyMs,
+    depth: record.generationDepth,
+    rank: record.rank,
+    parentId: record.parentId ?? "root",
+    position: initialPosition,
+    prompt: record.requestPrompt,
+    model: record.requestModel,
+    preset: record.requestPreset,
+    temperature: record.requestTemperature,
+    topP: record.requestTopP,
+    variation: record.requestVariation,
+    demoMode: record.requestDemoMode,
+    responseMode: record.responseMode,
+    textPreview: record.contextAfter,
+    isMainPath: record.rank === 1,
+    status: "idle",
+    reasoning,
+    branchRationale: record.branchRationale,
+    metadata: record.metadata,
+    rawLogits: null,
+    topAlternatives: record.sourceAlternatives.map(mapGraphAlternativeToInspector),
+    sourceAlternatives: record.sourceAlternatives.map(mapGraphAlternativeToInspector),
+  });
 }
 
 function ensureProbabilityEdgeData(data?: ProbabilityFlowEdge["data"]) {
@@ -1421,6 +1501,8 @@ function buildInspectorAlternatives(
   const alternatives = [
     {
       branchId: node.branchId,
+      predictionId: node.id,
+      tokenIndex: node.generationStep,
       token: node.rawToken,
       displayToken: node.displayToken,
       tokenBytes: node.tokenBytes,
@@ -2504,7 +2586,7 @@ function Workspace() {
     }
   }
 
-  async function expandNode(nodeId: string, options?: { pushHistory?: boolean }) {
+  async function expandContinuationNode(nodeId: string, options?: { pushHistory?: boolean }) {
     const node = nodesRef.current.find((currentNode) => currentNode.id === nodeId);
     const validation = buildContinuationValidation(tokenGraphRef.current, nodeId);
 
@@ -2815,7 +2897,133 @@ function Workspace() {
     }
   }
 
-  expandNodeRef.current = expandNode;
+  async function expandStoredAlternatives(
+    nodeId: string,
+    options?: { pushHistory?: boolean },
+  ) {
+    const node = nodesRef.current.find((currentNode) => currentNode.id === nodeId);
+
+    if (
+      !node ||
+      node.data.kind !== "token" ||
+      !node.data.parentId ||
+      node.data.topAlternatives.length === 0
+    ) {
+      return false;
+    }
+
+    setSelectedNodeId(nodeId);
+    setContextMenu(null);
+
+    const nextTokenGraph = materializeSourceAlternativesForNode(tokenGraphRef.current, nodeId);
+    const parentNodeId = node.data.parentId;
+    const parentNode = nodesRef.current.find((currentNode) => currentNode.id === parentNodeId);
+    const parentRecord = nextTokenGraph.nodesById[parentNodeId];
+
+    if (!parentNode || !parentRecord) {
+      return false;
+    }
+
+    setTokenGraph(nextTokenGraph);
+    tokenGraphRef.current = nextTokenGraph;
+
+    const responseChildIds = new Set(parentRecord.childIds);
+    const currentChildren = edgesRef.current
+      .filter((edge) => edge.source === parentNodeId)
+      .map((edge) => nodesRef.current.find((item) => item.id === edge.target))
+      .filter((item): item is TokenFlowNode => Boolean(item));
+    const staleNodeIds = new Set<string>();
+
+    for (const child of currentChildren) {
+      if (responseChildIds.has(child.id)) {
+        continue;
+      }
+
+      staleNodeIds.add(child.id);
+      for (const descendantId of collectDescendantIds(child.id, edgesRef.current)) {
+        staleNodeIds.add(descendantId);
+      }
+    }
+
+    const nextNodes = nodesRef.current.filter((currentNode) => !staleNodeIds.has(currentNode.id));
+    const nextEdges = edgesRef.current.filter(
+      (edge) =>
+        !staleNodeIds.has(edge.source) &&
+        !staleNodeIds.has(edge.target) &&
+        (edge.source !== parentNodeId || responseChildIds.has(edge.target)),
+    );
+    const existingNodeIndexById = new Map(
+      nextNodes.map((currentNode, index) => [currentNode.id, index]),
+    );
+    const materializedChildren = parentRecord.childIds
+      .map((childId) => nextTokenGraph.nodesById[childId])
+      .filter(
+        (candidate): candidate is TokenGraphNodeRecord =>
+          Boolean(candidate) && candidate.kind === "token" && candidate.parentId === parentNodeId,
+      );
+
+    for (const childRecord of materializedChildren) {
+      const existingIndex = existingNodeIndexById.get(childRecord.id);
+
+      if (typeof existingIndex === "number") {
+        nextNodes[existingIndex] = applyTokenGraphRecordToFlowNode(nextNodes[existingIndex], childRecord);
+      } else {
+        nextNodes.push(
+          applyTokenGraphRecordToFlowNode(
+            buildFlowNodeFromRecord(childRecord, parentNode),
+            childRecord,
+          ),
+        );
+      }
+
+      const nextEdge = buildEdge(
+        parentNodeId,
+        childRecord.id,
+        childRecord.probability,
+        childRecord.rank === 1,
+      );
+      const existingEdgeIndex = nextEdges.findIndex((edge) => edge.id === nextEdge.id);
+
+      if (existingEdgeIndex >= 0) {
+        nextEdges[existingEdgeIndex] = {
+          ...nextEdges[existingEdgeIndex],
+          data: nextEdge.data,
+        };
+      } else {
+        nextEdges.push(nextEdge);
+      }
+    }
+
+    applyTransition(
+      {
+        nodes: syncFlowNodesWithTokenGraph(nextNodes, nextTokenGraph),
+        edges: nextEdges,
+        selectedNodeId: nodeId,
+      },
+      options,
+    );
+
+    return true;
+  }
+
+  async function expandTokenOccurrence(
+    nodeId: string,
+    options?: { pushHistory?: boolean },
+  ) {
+    const node = nodesRef.current.find((currentNode) => currentNode.id === nodeId);
+
+    if (!node) {
+      return false;
+    }
+
+    if (node.data.kind === "token" && node.data.topAlternatives.length > 0) {
+      return expandStoredAlternatives(nodeId, options);
+    }
+
+    return expandContinuationNode(nodeId, options);
+  }
+
+  expandNodeRef.current = expandTokenOccurrence;
 
   async function continueGenerationFrom(nodeId: string, steps: number) {
     const validation = buildContinuationValidation(tokenGraphRef.current, nodeId);
@@ -2833,7 +3041,7 @@ function Workspace() {
     let currentNodeId = nodeId;
 
     for (let step = 0; step < steps; step += 1) {
-      const expanded = await expandNode(currentNodeId, { pushHistory: false });
+      const expanded = await expandContinuationNode(currentNodeId, { pushHistory: false });
 
       if (!expanded) {
         break;
@@ -3080,11 +3288,16 @@ function Workspace() {
 
   async function handleExpandAll() {
     const visibleExpandableNodes = displayNodes.filter(
-      (node) => !node.hidden && !node.data.distributionRequested && node.id !== "root",
+      (node) =>
+        !node.hidden &&
+        node.id !== "root" &&
+        (node.data.topAlternatives.length > 0
+          ? !node.data.alternativesExpanded
+          : !node.data.distributionRequested),
     );
 
     for (const node of visibleExpandableNodes) {
-      await expandNode(node.id, { pushHistory: false });
+      await expandTokenOccurrence(node.id, { pushHistory: false });
     }
 
     pushHistorySnapshot(getCurrentSnapshot());
@@ -3207,7 +3420,10 @@ function Workspace() {
     setSelectedNodeId(targetNodeId);
   }
 
-  async function ensureInspectorAlternativeNode(alternative: InspectorAlternative) {
+  async function ensureInspectorAlternativeNode(
+    sourceNodeId: string,
+    alternative: InspectorAlternative,
+  ) {
     if (
       alternative.nodeId &&
       nodesRef.current.some((node) => node.id === alternative.nodeId)
@@ -3215,12 +3431,14 @@ function Workspace() {
       return alternative.nodeId;
     }
 
-    if (!selectedNode || !selectedNode.data.parentId) {
+    const sourceNode = nodesRef.current.find((node) => node.id === sourceNodeId);
+
+    if (!sourceNode || sourceNode.data.kind !== "token" || !sourceNode.data.parentId) {
       return null;
     }
 
-    const parentNodeId = selectedNode.data.parentId;
-    const expanded = await expandNode(parentNodeId, { pushHistory: false });
+    const parentNodeId = sourceNode.data.parentId;
+    const expanded = await expandTokenOccurrence(sourceNodeId, { pushHistory: false });
 
     if (!expanded) {
       return null;
@@ -3237,8 +3455,11 @@ function Workspace() {
     );
   }
 
-  async function handleInspectorAlternativeSelect(alternative: InspectorAlternative) {
-    const targetNodeId = await ensureInspectorAlternativeNode(alternative);
+  async function handleInspectorAlternativeSelect(
+    sourceNodeId: string,
+    alternative: InspectorAlternative,
+  ) {
+    const targetNodeId = await ensureInspectorAlternativeNode(sourceNodeId, alternative);
 
     if (!targetNodeId) {
       return;
@@ -3441,7 +3662,7 @@ function Workspace() {
         {
           label: "Expand futures",
           onSelect: () => {
-            void expandNode(contextMenu.nodeId, { pushHistory: true });
+            void expandTokenOccurrence(contextMenu.nodeId, { pushHistory: true });
             setContextMenu(null);
           },
         },
@@ -4010,9 +4231,9 @@ function Workspace() {
                 <div className="alternatives-list">
                   {inspectorAlternatives.map((alternative) => (
                     <button
-                      key={`${selectedNode.id}-${alternative.nodeId ?? alternative.token}`}
+                      key={`${selectedNode.id}-${alternative.predictionId ?? alternative.nodeId ?? alternative.tokenIndex ?? alternative.token}`}
                       className={`alternative-row${alternative.isChosen ? " alternative-row--chosen" : ""}`}
-                      onClick={() => handleInspectorAlternativeSelect(alternative)}
+                      onClick={() => handleInspectorAlternativeSelect(selectedNode.id, alternative)}
                       type="button"
                     >
                       <span className="alternative-row__token">
