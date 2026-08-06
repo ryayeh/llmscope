@@ -8,15 +8,15 @@ import { LoaderCircle } from "lucide-react";
 import type { TokenFlowNode } from "@/components/canvas/types";
 
 function formatPercent(value: number) {
-  return `${Math.round(value * 100)}%`;
+  return `${(value * 100).toFixed(1)}%`;
 }
 
 function getNodeTone({
-  isMainPath,
+  isActiveReality,
   probability,
   selected,
 }: {
-  isMainPath: boolean;
+  isActiveReality: boolean;
   probability: number;
   selected: boolean;
 }) {
@@ -29,7 +29,7 @@ function getNodeTone({
     };
   }
 
-  if (isMainPath) {
+  if (isActiveReality) {
     return {
       accent: "#38bdf8",
       border: "rgba(56, 189, 248, 0.4)",
@@ -57,8 +57,8 @@ function getNodeTone({
 
 export function TokenNode({ data, selected }: NodeProps<TokenFlowNode>) {
   const tone = getNodeTone({
-    isMainPath: data.isMainPath || data.kind === "prompt",
-    probability: data.probability,
+    isActiveReality: data.isActiveReality || data.kind === "prompt",
+    probability: data.displayProbability,
     selected,
   });
   const style = {
@@ -72,7 +72,13 @@ export function TokenNode({ data, selected }: NodeProps<TokenFlowNode>) {
     <div
       className={`token-node${selected ? " token-node--selected" : ""}${
         data.kind === "prompt" ? " token-node--prompt" : ""
-      }${data.status === "loading" ? " token-node--loading" : ""}`}
+      }${data.status === "loading" ? " token-node--loading" : ""}${
+        data.isDimmed ? " token-node--dimmed" : ""
+      }${data.isSearchMatch ? " token-node--search-match" : ""}${
+        data.isSearchFocused ? " token-node--search-focused" : ""
+      }${data.isActiveReality ? " token-node--active-reality" : ""}${
+        data.isPinned ? " token-node--pinned" : ""
+      }`}
       style={style}
     >
       <Handle className="token-node__handle" position={Position.Left} type="target" />
@@ -85,19 +91,71 @@ export function TokenNode({ data, selected }: NodeProps<TokenFlowNode>) {
       ) : null}
 
       <div className="token-node__body">
-        <p className="token-node__title">{data.tokenText}</p>
+        <p className="token-node__title">{data.displayTokenText}</p>
+        {data.kind === "token" && data.isActiveReality ? (
+          <span className="token-node__status-badge">Selected</span>
+        ) : null}
       </div>
+
+      <div className="token-node__probability">{formatPercent(data.displayProbability)}</div>
 
       <div className="token-node__rail">
         <div
           className="token-node__rail-fill"
-          style={{ width: `${Math.max(data.probability * 100, data.kind === "prompt" ? 100 : 10)}%` }}
+          style={{
+            width: `${Math.max(data.displayProbability * 100, data.kind === "prompt" ? 100 : 10)}%`,
+          }}
         />
       </div>
 
       <div className="token-node__hover">
-        <p className="token-node__hover-label">{formatPercent(data.probability)}</p>
-        <p className="token-node__hover-preview">{data.textPreview}</p>
+        <p className="token-node__hover-label">
+          {formatPercent(data.displayProbability)} |{" "}
+          {data.probabilityMode === "normalized" ? "Normalized Top-K" : "Raw"}
+        </p>
+        <div className="token-node__hover-grid">
+          <p>
+            <strong>Raw</strong>
+            <span className="token-node__hover-code">{data.tokenText || "..."}</span>
+          </p>
+          <p>
+            <strong>Shown</strong>
+            <span className="token-node__hover-code">{data.displayTokenText || "..."}</span>
+          </p>
+          <p>
+            <strong>Shown p</strong>
+            <span>{formatPercent(data.displayProbability)}</span>
+          </p>
+          <p>
+            <strong>Raw p</strong>
+            <span>{formatPercent(data.rawProbability)}</span>
+          </p>
+          <p>
+            <strong>Bytes</strong>
+            <span className="token-node__hover-code">{data.tokenBytes.join(" ") || "..."}</span>
+          </p>
+          <p>
+            <strong>UTF-8</strong>
+            <span>{data.utf8Length}</span>
+          </p>
+          <p>
+            <strong>Chars</strong>
+            <span>{data.characterLength}</span>
+          </p>
+          <p>
+            <strong>Lead ws</strong>
+            <span>{data.leadingWhitespaceCount}</span>
+          </p>
+          <p>
+            <strong>Trail ws</strong>
+            <span>{data.trailingWhitespaceCount}</span>
+          </p>
+          <p>
+            <strong>Tokenizer</strong>
+            <span>{data.tokenizerId ?? "-"}</span>
+          </p>
+        </div>
+        <p className="token-node__hover-preview">{data.contextAfter || data.textPreview}</p>
         <p className="token-node__hover-hint">
           {data.kind === "prompt" ? "Double-click to open futures" : "Double-click to continue"}
         </p>

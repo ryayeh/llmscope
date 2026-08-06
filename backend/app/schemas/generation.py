@@ -1,42 +1,87 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from app.models.provider import ModelProvider
 
 
+class ApiErrorDetail(BaseModel):
+    code: str
+    message: str
+
+
 class AlternativeCandidate(BaseModel):
+    node_id: str | None = None
     token: str
+    display_token: str | None = None
+    token_bytes: list[int] = Field(default_factory=list)
+    decoded_contribution: str | None = None
+    cumulative_decoded_text: str | None = None
+    cumulative_token_ids: list[int] | None = None
+    cumulative_log_probability: float | None = None
     probability: float = Field(..., ge=0, le=1)
+    raw_probability: float | None = Field(default=None, ge=0, le=1)
+    normalized_displayed_probability: float | None = Field(default=None, ge=0, le=1)
     log_probability: float | None = None
     entropy: float | None = None
     latency_ms: int | None = Field(default=None, ge=0)
     token_id: int | None = Field(default=None, ge=0)
+    tokenizer_id: int | None = Field(default=None, ge=0)
+    rank: int | None = Field(default=None, ge=1)
     text_preview: str | None = None
+    context_before: str | None = None
+    context_after: str | None = None
+    finish_reason: str | None = None
     rationale: str | None = None
+    generation_step: int | None = Field(default=None, ge=0)
+    metadata: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
 
 
 class TokenTrace(BaseModel):
     id: str
+    branch_id: str
+    parent_node_id: str | None = None
+    model: str
+    source: Literal["openai", "demo"]
+    index: int = Field(..., ge=0)
+    position: int = Field(..., ge=0)
     token: str
-    token_id: int = Field(..., ge=0)
+    display_token: str
+    token_bytes: list[int] = Field(default_factory=list)
+    decoded_contribution: str
+    cumulative_decoded_text: str
+    cumulative_token_ids: list[int] | None = None
+    cumulative_log_probability: float
+    token_id: int | None = Field(default=None, ge=0)
+    tokenizer_id: int | None = Field(default=None, ge=0)
     probability: float = Field(..., ge=0, le=1)
+    raw_probability: float = Field(..., ge=0, le=1)
+    normalized_displayed_probability: float = Field(..., ge=0, le=1)
     log_probability: float
     entropy: float = Field(..., ge=0)
     cumulative_probability: float = Field(..., ge=0, le=1)
     latency_ms: int = Field(..., ge=0)
-    position: int = Field(..., ge=0)
     text_preview: str
+    context_before: str
+    context_after: str
+    finish_reason: str | None = None
     alternatives: list[AlternativeCandidate] = Field(default_factory=list)
+    generation_step: int = Field(..., ge=0)
+    metadata: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
 
 
 class TokenTreeNode(BaseModel):
     id: str
     token: str
-    token_id: int = Field(..., ge=0)
+    display_token: str | None = None
+    token_id: int | None = Field(default=None, ge=0)
+    tokenizer_id: int | None = Field(default=None, ge=0)
     probability: float = Field(..., ge=0, le=1)
+    raw_probability: float | None = Field(default=None, ge=0, le=1)
+    normalized_displayed_probability: float | None = Field(default=None, ge=0, le=1)
     log_probability: float
     entropy: float = Field(..., ge=0)
     cumulative_probability: float = Field(..., ge=0, le=1)
@@ -69,7 +114,9 @@ class RequestEcho(BaseModel):
     preset: str = Field(default="general")
     max_tokens: int = Field(..., ge=1, le=4096)
     temperature: float = Field(..., ge=0, le=2)
+    top_p: float = Field(default=1.0, ge=0, le=1)
     variation: int = Field(default=0, ge=0)
+    demo_mode: bool = False
 
 
 class GenerationStats(BaseModel):
@@ -89,19 +136,20 @@ class GenerationRequest(BaseModel):
     preset: str = Field(default="general")
     max_tokens: int = Field(default=256, ge=1, le=4096)
     temperature: float = Field(default=0.7, ge=0, le=2)
+    top_p: float = Field(default=1.0, ge=0, le=1)
     variation: int = Field(default=0, ge=0)
+    demo_mode: bool = False
 
     @field_validator("prompt")
     @classmethod
     def validate_prompt(cls, value: str) -> str:
-        prompt = value.strip()
-        if not prompt:
+        if not value.strip():
             raise ValueError("Prompt must not be blank.")
-        return prompt
+        return value
 
 
 class GenerationResponse(BaseModel):
-    mode: str = Field(default="mock")
+    mode: str = Field(default="live")
     prompt_used: str
     completion: str
     notes: str
@@ -114,33 +162,61 @@ class GenerationResponse(BaseModel):
 
 
 class NodeExpansionRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=10000)
+    root_prompt: str = Field(
+        ...,
+        min_length=1,
+        max_length=10000,
+        validation_alias=AliasChoices("root_prompt", "prompt"),
+        serialization_alias="root_prompt",
+    )
     model: str = Field(default="gpt-4.1-mini")
     preset: str = Field(default="general")
     temperature: float = Field(default=0.7, ge=0, le=2)
+    top_p: float = Field(default=1.0, ge=0, le=1)
     parent_node_id: str = Field(..., min_length=1)
     parent_token: str = Field(default="")
-    parent_text_preview: str = Field(default="")
+    assistant_prefix: str = Field(
+        default="",
+        max_length=50000,
+        validation_alias=AliasChoices("assistant_prefix", "parent_text_preview"),
+        serialization_alias="assistant_prefix",
+    )
+    reconstructed_prompt: str = Field(default="", max_length=60000)
+    expected_prompt_length: int | None = Field(default=None, ge=0)
+    expected_utf8_length: int | None = Field(default=None, ge=0)
+    expected_token_count: int | None = Field(default=None, ge=0)
     depth: int = Field(default=0, ge=0)
     cumulative_probability: float = Field(default=1.0, ge=0, le=1)
     variation: int = Field(default=0, ge=0)
-    max_children: int = Field(default=4, ge=1, le=8)
+    max_children: int = Field(default=4, ge=1, le=20)
+    demo_mode: bool = False
 
-    @field_validator("prompt")
+    @field_validator("root_prompt")
     @classmethod
     def validate_expansion_prompt(cls, value: str) -> str:
-        prompt = value.strip()
-        if not prompt:
+        if not value.strip():
             raise ValueError("Prompt must not be blank.")
-        return prompt
+        return value
 
 
 class NodeExpansionCandidate(BaseModel):
     id: str
+    branch_id: str
     parent_node_id: str
+    model: str
+    source: Literal["openai", "demo"]
     token: str
-    token_id: int = Field(..., ge=0)
+    display_token: str
+    token_bytes: list[int] = Field(default_factory=list)
+    decoded_contribution: str
+    cumulative_decoded_text: str
+    cumulative_token_ids: list[int] | None = None
+    cumulative_log_probability: float
+    token_id: int | None = Field(default=None, ge=0)
+    tokenizer_id: int | None = Field(default=None, ge=0)
     probability: float = Field(..., ge=0, le=1)
+    raw_probability: float = Field(..., ge=0, le=1)
+    normalized_displayed_probability: float = Field(..., ge=0, le=1)
     log_probability: float
     entropy: float = Field(..., ge=0)
     cumulative_probability: float = Field(..., ge=0, le=1)
@@ -148,11 +224,16 @@ class NodeExpansionCandidate(BaseModel):
     depth: int = Field(..., ge=0)
     rank: int = Field(..., ge=1)
     text_preview: str
+    context_before: str
+    context_after: str
+    finish_reason: str | None = None
     rationale: str | None = None
+    generation_step: int = Field(..., ge=0)
+    metadata: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
 
 
 class NodeExpansionResponse(BaseModel):
-    mode: str = Field(default="inferred")
+    mode: str = Field(default="live")
     parent_node_id: str
     children: list[NodeExpansionCandidate] = Field(default_factory=list)
     entropy: float = Field(..., ge=0)

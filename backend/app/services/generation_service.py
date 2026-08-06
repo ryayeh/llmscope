@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import logging
 import math
+import re
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
-import re
 import zlib
 
 from openai import OpenAI
 
 from app.core.config import get_settings
+from app.core.errors import LLMScopeError
 from app.models.provider import ModelProvider
 from app.schemas.generation import (
     AlternativeCandidate,
@@ -27,9 +30,9 @@ from app.schemas.generation import (
 )
 from app.schemas.model_catalog import ModelCatalogResponse, ModelOption, PresetOption
 
-TOKEN_PATTERN = re.compile(r"\w+(?:[-']\w+)*|[^\w\s]")
+logger = logging.getLogger(__name__)
 
-IMPORTANT_SHORT_WORDS = {"ai", "api", "app", "bug", "db", "ml", "sdk", "ui", "ux"}
+IMPORTANT_SHORT_WORDS = {"ai", "api", "app", "bug", "db", "llm", "ml", "sdk", "ui", "ux"}
 
 STOP_WORDS = {
     "a",
@@ -81,111 +84,11 @@ STOP_WORDS = {
     "write",
     "you",
     "your",
-    "brief",
-    "briefly",
-    "compare",
-    "create",
-    "debug",
-    "english",
-    "explain",
 }
 
-ALTERNATIVE_MAP: dict[str, list[tuple[str, str]]] = {
-    "benchmark": [
-        ("range", "Frames the answer as a band instead of one number."),
-        ("mark", "Uses a performance-oriented term."),
-        ("target", "Leans toward a goal-setting framing."),
-    ],
-    "difference": [
-        ("contrast", "A sharper comparison word."),
-        ("distinction", "A more formal comparison term."),
-        ("gap", "A shorter, more direct contrast term."),
-    ],
-    "debug": [
-        ("trace", "Shifts toward a step-by-step investigation."),
-        ("inspect", "Focuses on looking closely at the failure."),
-        ("diagnose", "Frames the issue as something to isolate."),
-    ],
-    "explain": [
-        ("describe", "A broader framing for the same idea."),
-        ("clarify", "Leans toward removing ambiguity."),
-        ("outline", "Suggests a structured walkthrough."),
-    ],
-    "fast": [
-        ("quick", "Keeps the performance framing direct."),
-        ("strong", "Frames the mark as competitive."),
-        ("sharp", "Suggests better execution."),
-    ],
-    "good": [
-        ("solid", "Keeps the answer practical."),
-        ("strong", "Raises the performance bar slightly."),
-        ("competitive", "Frames it relative to other athletes."),
-    ],
-    "latency": [
-        ("speed", "A simpler performance term."),
-        ("timing", "Focuses on elapsed execution behavior."),
-        ("delay", "Emphasizes waiting time."),
-    ],
-    "prompt": [
-        ("request", "A more general input term."),
-        ("instruction", "Frames the input as a directive."),
-        ("message", "Uses a chat-oriented label."),
-    ],
-    "quality": [
-        ("accuracy", "Focuses on correctness."),
-        ("consistency", "Focuses on repeatable behavior."),
-        ("fidelity", "Focuses on staying close to the goal."),
-    ],
-    "time": [
-        ("mark", "Uses a performance label instead of a clock word."),
-        ("range", "Suggests a realistic band."),
-        ("benchmark", "Frames it as a comparison point."),
-    ],
-    "token": [
-        ("candidate", "Focuses on the decoding choice."),
-        ("piece", "Uses a looser text fragment term."),
-        ("symbol", "Moves toward a lower-level representation."),
-    ],
-}
-
-INTENT_FALLBACKS: dict[str, list[tuple[str, str]]] = {
-    "comparison": [
-        ("trade-off", "Emphasizes the decision boundary."),
-        ("control", "Highlights predictability."),
-        ("flexibility", "Highlights adaptability."),
-        ("baseline", "Keeps the branch grounded in a default."),
-    ],
-    "debugging": [
-        ("trace", "Points at the data to inspect."),
-        ("failure", "Keeps the problem concrete."),
-        ("guardrail", "Suggests a protective follow-up."),
-        ("test", "Points toward verification."),
-    ],
-    "planning": [
-        ("baseline", "Starts from the simplest viable path."),
-        ("measure", "Pushes toward evidence before tuning."),
-        ("iterate", "Keeps the process incremental."),
-        ("checkpoint", "Adds a clear control point."),
-    ],
-    "enumeration": [
-        ("option", "Keeps the branch list-oriented."),
-        ("path", "Frames the choice as a route."),
-        ("default", "Suggests the safest first choice."),
-        ("variant", "Keeps the branch practical."),
-    ],
-    "summary": [
-        ("core", "Pulls toward the main idea."),
-        ("signal", "Emphasizes what matters most."),
-        ("theme", "Frames the response more broadly."),
-        ("focus", "Keeps attention on the center of the prompt."),
-    ],
-    "explanation": [
-        ("context", "Adds a clearer setup."),
-        ("example", "Makes the point more concrete."),
-        ("result", "Focuses on the practical outcome."),
-        ("reason", "Keeps the answer tied to cause and effect."),
-    ],
-}
+DEFAULT_TOP_LOGPROBS = 6
+MIN_PROBABILITY = 0.000001
+DEMO_TOKEN_PATTERN = re.compile(r"\s*\S+")
 
 PRESET_OPTIONS = [
     PresetOption(id="general", label="General"),
@@ -246,6 +149,16 @@ MODEL_OPTION_MAP = {option.id: option for option in MODEL_OPTIONS}
 PRESET_OPTION_MAP = {option.id: option for option in PRESET_OPTIONS}
 
 
+@dataclass(frozen=True)
+class ContinuationContext:
+    root_prompt: str
+    assistant_prefix: str
+    reconstructed_prompt: str
+    character_length: int
+    utf8_length: int
+    token_count: int
+
+
 class GenerationService:
     def __init__(self) -> None:
         self._settings = get_settings()
@@ -260,7 +173,7 @@ class GenerationService:
         )
 
     def build_response(self, request: GenerationRequest) -> GenerationResponse:
-        prompt = request.prompt.strip()
+        prompt = request.prompt
         keywords = self._extract_keywords(prompt)
         intent, strategy = self._detect_intent(prompt.lower())
         preset = request.preset if request.preset in PRESET_OPTION_MAP else "general"
@@ -274,30 +187,27 @@ class GenerationService:
             ),
         )
 
-        completion, response_mode, usage, latency_ms = self._generate_completion(
-            request=request,
-            prompt=prompt,
-            keywords=keywords,
-            intent=intent,
-            preset=preset,
-        )
-        completion = self._truncate_completion(completion, request.max_tokens)
+        if request.demo_mode:
+            completion, response_mode, usage, latency_ms, tokens = self._build_demo_generation(
+                request=request,
+                prompt=prompt,
+                keywords=keywords,
+                intent=intent,
+                preset=preset,
+            )
+        else:
+            completion, response_mode, usage, latency_ms, tokens = self._build_live_generation(
+                request=request,
+                prompt=prompt,
+                intent=intent,
+                preset=preset,
+            )
 
-        tokens = self._build_token_traces(
-            prompt=prompt,
-            completion=completion,
-            keywords=keywords,
-            intent=intent,
-            temperature=request.temperature,
-        )
         tree, tree_summary = self._build_tree(tokens)
-
-        prompt_tokens = usage.input_tokens if usage else self._estimate_prompt_tokens(prompt, keywords)
-        completion_tokens = len(tokens)
-        total_tokens = prompt_tokens + completion_tokens
-        effective_latency_ms = latency_ms or (
-            sum(token.latency_ms for token in tokens) + 150 + (len(keywords) * 10)
-        )
+        prompt_tokens = self._usage_value(usage, "input_tokens") or self._estimate_prompt_tokens(prompt, keywords)
+        completion_tokens = self._usage_value(usage, "output_tokens") or len(tokens)
+        total_tokens = self._usage_value(usage, "total_tokens") or (prompt_tokens + completion_tokens)
+        effective_latency_ms = latency_ms or max(1, len(tokens) * 30)
 
         stats = GenerationStats(
             provider=model_option.provider,
@@ -317,14 +227,14 @@ class GenerationService:
         insights = PromptInsights(
             detected_intent=intent.replace("_", " "),
             focus_terms=keywords[:5],
-            response_strategy=PRESET_INSTRUCTIONS[preset] + f" {strategy}",
+            response_strategy=f"{PRESET_INSTRUCTIONS[preset]} {strategy}",
             suggested_follow_ups=self._build_follow_ups(keywords, intent),
         )
 
         notes = (
-            "Live response with an inferred token trace."
-            if response_mode == "live"
-            else "Local fallback response with an inferred token trace."
+            "Demo data. Token alternatives are synthetic because Demo Mode is enabled."
+            if request.demo_mode
+            else "Live provider response with per-token logprobs."
         )
 
         return GenerationResponse(
@@ -338,7 +248,9 @@ class GenerationService:
                 preset=preset,
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
+                top_p=request.top_p,
                 variation=request.variation,
+                demo_mode=request.demo_mode,
             ),
             insights=insights,
             tokens=tokens,
@@ -348,120 +260,45 @@ class GenerationService:
         )
 
     def expand_node(self, request: NodeExpansionRequest) -> NodeExpansionResponse:
-        parent_preview = request.parent_text_preview.strip()
-        context_keywords = self._extract_keywords(
-            " ".join(part for part in (request.prompt, parent_preview) if part),
-            limit=8,
-        )
-        intent, _ = self._detect_intent(request.prompt.lower())
-        source_trace: TokenTrace | None = None
-        response_mode = "fallback"
-        response_notes = (
-            "Next-token distribution inferred locally from the prompt and current branch context."
-        )
+        context = self._build_continuation_context(request)
+        prompt = context.root_prompt
+        preset = request.preset if request.preset in PRESET_OPTION_MAP else "general"
+        assistant_prefix = context.assistant_prefix
+        intent, _ = self._detect_intent(prompt.lower())
 
-        try:
-            generation = self.build_response(
-                GenerationRequest(
-                    prompt=request.prompt,
-                    model=request.model,
-                    preset=request.preset,
-                    max_tokens=max(request.depth + request.max_children + 12, 48),
-                    temperature=request.temperature,
-                    variation=request.variation,
-                )
-            )
-
-            if request.depth < len(generation.tokens):
-                source_trace = generation.tokens[request.depth]
-                response_mode = generation.mode or "inferred"
-                response_notes = (
-                    "Next-token distribution derived from the current generation path."
-                )
-        except Exception:
-            source_trace = None
-
-        if source_trace is not None:
-            candidate_specs = self._candidate_specs_from_source_trace(source_trace)
-        else:
-            candidate_specs = self._candidate_specs_from_context(
-                prompt=request.prompt,
-                parent_preview=parent_preview,
-                parent_token=request.parent_token,
-                context_keywords=context_keywords,
+        if request.demo_mode:
+            children, entropy, response_mode = self._build_demo_expansion(
+                request=request,
+                prompt=prompt,
+                assistant_prefix=assistant_prefix,
                 intent=intent,
-                depth=request.depth,
             )
-
-        deduped_specs: list[tuple[str, float, int, str | None]] = []
-        seen_tokens: set[str] = set()
-
-        for token, probability, latency_ms, rationale in candidate_specs:
-            normalized = token.lower()
-            if normalized in seen_tokens:
-                continue
-            seen_tokens.add(normalized)
-            deduped_specs.append((token, probability, latency_ms, rationale))
-
-            if len(deduped_specs) == request.max_children:
-                break
-
-        if not deduped_specs:
-            fallback_token = request.parent_token.strip() or (
-                context_keywords[0] if context_keywords else "next"
+            notes = "Demo data. Token alternatives are synthetic because Demo Mode is enabled."
+        else:
+            steps, _, latency_ms = self._request_live_steps(
+                request=request,
+                prompt=prompt,
+                preset=preset,
+                intent=intent,
+                assistant_prefix=assistant_prefix,
+                branch_id=request.parent_node_id,
+                parent_node_id=request.parent_node_id,
+                max_output_tokens=1,
+                top_logprobs=request.max_children,
             )
-            deduped_specs = [
-                (
-                    fallback_token,
-                    1.0,
-                    36 + (request.depth * 3),
-                    "Fallback continuation inferred from the available branch context.",
-                )
-            ]
+            if not steps:
+                self._raise_logprobs_unavailable()
 
-        normalized_probabilities = self._normalize_probabilities(
-            [probability for _, probability, _, _ in deduped_specs]
-        )
-        entropy = self._calculate_entropy(normalized_probabilities)
-        children: list[NodeExpansionCandidate] = []
-
-        for index, ((token, _, latency_ms, rationale), probability) in enumerate(
-            zip(deduped_specs, normalized_probabilities, strict=False),
-            start=1,
-        ):
-            text_preview = self._join_tokens(
-                [*self._tokenize(parent_preview), token]
-                if parent_preview
-                else [token]
+            source_trace = steps[0]
+            latency_value = latency_ms or source_trace.latency_ms
+            children = self._build_expansion_children_from_trace(
+                request=request,
+                trace=source_trace,
+                latency_ms=latency_value,
             )
-            cumulative_probability = round(
-                self._clamp(request.cumulative_probability * probability, 0.000001, 1.0),
-                6,
-            )
-            token_id = self._make_token_id(
-                token=token,
-                depth=request.depth + 1,
-                rank=index,
-                preview=text_preview,
-            )
-
-            children.append(
-                NodeExpansionCandidate(
-                    id=f"{request.parent_node_id}::{request.depth + 1}:{index}:{token_id}",
-                    parent_node_id=request.parent_node_id,
-                    token=token,
-                    token_id=token_id,
-                    probability=probability,
-                    log_probability=self._safe_log(probability),
-                    entropy=entropy,
-                    cumulative_probability=cumulative_probability,
-                    latency_ms=latency_ms,
-                    depth=request.depth + 1,
-                    rank=index,
-                    text_preview=text_preview,
-                    rationale=rationale,
-                )
-            )
+            entropy = source_trace.entropy
+            response_mode = "live"
+            notes = "Next-token distribution returned by the provider for this exact branch context."
 
         return NodeExpansionResponse(
             mode=response_mode,
@@ -469,80 +306,518 @@ class GenerationService:
             children=children,
             entropy=entropy,
             expanded_at=datetime.now(timezone.utc),
-            notes=response_notes,
+            notes=notes,
         )
 
-    def _candidate_specs_from_source_trace(
-        self,
-        source_trace: TokenTrace,
-    ) -> list[tuple[str, float, int, str | None]]:
-        candidate_specs: list[tuple[str, float, int, str | None]] = [
-            (
-                source_trace.token,
-                source_trace.probability,
-                source_trace.latency_ms,
-                "Main continuation from the current generation path.",
-            )
-        ]
-        candidate_specs.extend(
-            (
-                candidate.token,
-                candidate.probability,
-                candidate.latency_ms or max(source_trace.latency_ms - 6, 18),
-                candidate.rationale,
-            )
-            for candidate in source_trace.alternatives
-        )
-        return candidate_specs
-
-    def _candidate_specs_from_context(
+    def _build_live_generation(
         self,
         *,
+        request: GenerationRequest,
         prompt: str,
-        parent_preview: str,
-        parent_token: str,
-        context_keywords: list[str],
         intent: str,
-        depth: int,
-    ) -> list[tuple[str, float, int, str | None]]:
-        fallback_token = parent_token.strip() or (
-            context_keywords[0] if context_keywords else "next"
+        preset: str,
+    ) -> tuple[str, str, Any | None, int, list[TokenTrace]]:
+        steps, usage, latency_ms = self._request_live_steps(
+            request=request,
+            prompt=prompt,
+            preset=preset,
+            intent=intent,
+            assistant_prefix="",
+            branch_id="main",
+            parent_node_id="root",
+            max_output_tokens=max(16, min(request.max_tokens, 1024)),
+            top_logprobs=DEFAULT_TOP_LOGPROBS,
         )
-        base_probability = 0.62
-        candidate_specs: list[tuple[str, float, int, str | None]] = [
-            (
-                fallback_token,
-                base_probability,
-                36 + (depth * 3),
-                "Fallback continuation inferred from the current prompt context.",
-            )
-        ]
-        candidate_specs.extend(
-            (
-                candidate.token,
-                candidate.probability,
-                candidate.latency_ms or 34 + (rank * 4),
-                candidate.rationale,
-            )
-            for rank, candidate in enumerate(
-                self._build_alternatives(
-                    token=fallback_token,
-                    actual_probability=base_probability,
-                    keywords=context_keywords,
-                    intent=intent,
-                    position=depth,
-                    context_candidates=self._build_context_candidates(
-                        prompt=prompt,
-                        completion=parent_preview or fallback_token,
-                        keywords=context_keywords,
-                    ),
-                ),
-                start=1,
-            )
-        )
-        return candidate_specs
 
-    def _generate_completion(
+        completion = "".join(step.token for step in steps)
+        return completion, "live", usage, latency_ms, steps
+
+    def _request_live_steps(
+        self,
+        *,
+        request: GenerationRequest | NodeExpansionRequest,
+        prompt: str,
+        preset: str,
+        intent: str,
+        assistant_prefix: str,
+        branch_id: str,
+        parent_node_id: str,
+        max_output_tokens: int,
+        top_logprobs: int,
+    ) -> tuple[list[TokenTrace], Any | None, int]:
+        client = self._get_client()
+
+        if client is None:
+            raise LLMScopeError(
+                code="OPENAI_NOT_CONFIGURED",
+                message="OpenAI is not configured on the backend. Enable Demo Mode or add an API key.",
+                status_code=503,
+            )
+
+        instructions = self._build_live_instructions(
+            preset=preset,
+            intent=intent,
+            variation=request.variation,
+        )
+        input_items: list[dict[str, str]] = [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ]
+
+        if assistant_prefix:
+            input_items.append(
+                {
+                    "role": "assistant",
+                    "content": assistant_prefix,
+                }
+            )
+
+        effective_output_tokens = max(16, max_output_tokens)
+        start_time = perf_counter()
+        try:
+            response = client.responses.create(
+                model=request.model,
+                input=input_items,
+                instructions=instructions,
+                include=["message.output_text.logprobs"],
+                max_output_tokens=effective_output_tokens,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                top_logprobs=max(1, min(top_logprobs, 20)),
+            )
+        except Exception as exc:  # pragma: no cover - depends on provider/network.
+            message = "The backend could not fetch token alternatives from the provider."
+            if self._settings.app_env.lower() == "development":
+                message = f"{message} {exc}"
+            raise LLMScopeError(
+                code="PROVIDER_REQUEST_FAILED",
+                message=message,
+                status_code=502,
+            ) from exc
+
+        latency_ms = max(1, int((perf_counter() - start_time) * 1000))
+        output_text, logprob_entries = self._extract_output_text_and_logprobs(response)
+
+        if not logprob_entries:
+            self._raise_logprobs_unavailable()
+
+        steps = self._build_live_token_traces(
+            branch_id=branch_id,
+            model=request.model,
+            source="openai",
+            parent_node_id=parent_node_id,
+            context_prefix=assistant_prefix,
+            logprob_entries=logprob_entries,
+            latency_ms=latency_ms,
+            finish_reason=getattr(response, "status", None),
+        )
+
+        if not steps and output_text:
+            self._raise_logprobs_unavailable()
+
+        return steps, getattr(response, "usage", None), latency_ms
+
+    def _extract_output_text_and_logprobs(self, response: Any) -> tuple[str, list[Any]]:
+        output_text_parts: list[str] = []
+        logprob_entries: list[Any] = []
+
+        for output_item in getattr(response, "output", []) or []:
+            if getattr(output_item, "type", None) != "message":
+                continue
+
+            for content_part in getattr(output_item, "content", []) or []:
+                if getattr(content_part, "type", None) != "output_text":
+                    continue
+
+                output_text_parts.append(getattr(content_part, "text", "") or "")
+                logprob_entries.extend(getattr(content_part, "logprobs", []) or [])
+
+        return "".join(output_text_parts), logprob_entries
+
+    def _build_live_token_traces(
+        self,
+        *,
+        branch_id: str,
+        model: str,
+        source: str,
+        parent_node_id: str,
+        context_prefix: str,
+        logprob_entries: list[Any],
+        latency_ms: int,
+        finish_reason: str | None = None,
+    ) -> list[TokenTrace]:
+        traces: list[TokenTrace] = []
+        cumulative_probability = 1.0
+        context_before = context_prefix
+        cumulative_log_probability = 0.0
+        cumulative_token_ids: list[int] | None = []
+        per_token_latency = max(1, int(round(latency_ms / max(len(logprob_entries), 1))))
+
+        for index, entry in enumerate(logprob_entries):
+            output_step = index
+            chosen_token = getattr(entry, "token", "")
+            chosen_logprob = float(getattr(entry, "logprob", 0.0))
+            chosen_token_bytes = getattr(entry, "bytes", []) or []
+            chosen_token_id = self._safe_optional_int(getattr(entry, "token_id", None))
+            chosen_tokenizer_id = self._safe_optional_int(getattr(entry, "tokenizer_id", None))
+            ranked_candidates, entropy = self._build_ranked_candidates(
+                chosen_token=chosen_token,
+                chosen_logprob=chosen_logprob,
+                chosen_bytes=chosen_token_bytes,
+                chosen_token_id=chosen_token_id,
+                chosen_tokenizer_id=chosen_tokenizer_id,
+                top_logprobs=getattr(entry, "top_logprobs", []) or [],
+                context_before=context_before,
+                generation_step=output_step,
+                latency_ms=per_token_latency,
+                parent_cumulative_log_probability=cumulative_log_probability,
+                parent_cumulative_token_ids=cumulative_token_ids,
+            )
+
+            if not ranked_candidates:
+                continue
+
+            chosen_candidate = ranked_candidates[0]
+            cumulative_probability = round(
+                self._clamp(
+                    cumulative_probability * chosen_candidate["raw_probability"],
+                    MIN_PROBABILITY,
+                    1.0,
+                ),
+                6,
+            )
+            step_parent_id = parent_node_id if index == 0 else traces[index - 1].id
+            step_id = self._make_step_id(
+                branch_id=branch_id,
+                token_index=output_step,
+                token=chosen_token,
+            )
+            trace = TokenTrace(
+                id=step_id,
+                branch_id=branch_id,
+                parent_node_id=step_parent_id,
+                model=model,
+                source=source,
+                index=output_step,
+                position=output_step,
+                token=chosen_token,
+                display_token=chosen_candidate["display_token"],
+                token_bytes=chosen_candidate["token_bytes"],
+                decoded_contribution=chosen_candidate["decoded_contribution"],
+                cumulative_decoded_text=chosen_candidate["cumulative_decoded_text"],
+                cumulative_token_ids=chosen_candidate["cumulative_token_ids"],
+                cumulative_log_probability=chosen_candidate["cumulative_log_probability"],
+                token_id=chosen_candidate["token_id"],
+                tokenizer_id=chosen_candidate["tokenizer_id"],
+                probability=chosen_candidate["raw_probability"],
+                raw_probability=chosen_candidate["raw_probability"],
+                normalized_displayed_probability=chosen_candidate[
+                    "normalized_displayed_probability"
+                ],
+                log_probability=chosen_candidate["log_probability"],
+                entropy=entropy,
+                cumulative_probability=cumulative_probability,
+                latency_ms=per_token_latency,
+                text_preview=chosen_candidate["cumulative_decoded_text"],
+                context_before=context_before,
+                context_after=chosen_candidate["cumulative_decoded_text"],
+                finish_reason=finish_reason,
+                generation_step=output_step,
+                metadata={
+                    "branch_id": branch_id,
+                    "parent_node_id": step_parent_id,
+                    "source": source,
+                },
+                alternatives=[
+                    AlternativeCandidate(
+                        node_id=self._make_step_id(
+                            branch_id=step_parent_id,
+                            token_index=output_step,
+                            token=candidate["token"],
+                        ),
+                        token=candidate["token"],
+                        display_token=candidate["display_token"],
+                        token_bytes=candidate["token_bytes"],
+                        decoded_contribution=candidate["decoded_contribution"],
+                        cumulative_decoded_text=candidate["cumulative_decoded_text"],
+                        cumulative_token_ids=candidate["cumulative_token_ids"],
+                        cumulative_log_probability=candidate["cumulative_log_probability"],
+                        probability=candidate["raw_probability"],
+                        raw_probability=candidate["raw_probability"],
+                        normalized_displayed_probability=candidate[
+                            "normalized_displayed_probability"
+                        ],
+                        log_probability=candidate["log_probability"],
+                        entropy=entropy,
+                        latency_ms=per_token_latency,
+                        token_id=candidate["token_id"],
+                        tokenizer_id=candidate["tokenizer_id"],
+                        rank=candidate["rank"],
+                        text_preview=candidate["cumulative_decoded_text"],
+                        context_before=context_before,
+                        context_after=candidate["cumulative_decoded_text"],
+                        rationale=None,
+                        generation_step=output_step,
+                        metadata={
+                            "branch_id": step_parent_id,
+                            "parent_node_id": step_parent_id,
+                            "source": source,
+                        },
+                    )
+                    for candidate in ranked_candidates[1:]
+                ],
+            )
+            traces.append(trace)
+            context_before = trace.cumulative_decoded_text
+            cumulative_log_probability = trace.cumulative_log_probability
+            cumulative_token_ids = trace.cumulative_token_ids
+
+        self._log_token_steps(branch_id=branch_id, context_suffix=context_before, steps=traces)
+        return traces
+
+    def _build_ranked_candidates(
+        self,
+        *,
+        chosen_token: str,
+        chosen_logprob: float,
+        chosen_bytes: list[int],
+        chosen_token_id: int | None,
+        chosen_tokenizer_id: int | None,
+        top_logprobs: list[Any],
+        context_before: str,
+        generation_step: int,
+        latency_ms: int,
+        parent_cumulative_log_probability: float,
+        parent_cumulative_token_ids: list[int] | None,
+    ) -> tuple[list[dict[str, Any]], float]:
+        deduped_candidates: list[tuple[str, float, list[int], int | None, int | None]] = []
+        seen_tokens: set[str] = set()
+
+        def add_candidate(
+            token: str,
+            logprob: float,
+            token_bytes: list[int],
+            token_id: int | None,
+            tokenizer_id: int | None,
+        ) -> None:
+            if token in seen_tokens:
+                return
+            seen_tokens.add(token)
+            deduped_candidates.append((token, logprob, token_bytes, token_id, tokenizer_id))
+
+        add_candidate(
+            chosen_token,
+            chosen_logprob,
+            chosen_bytes,
+            chosen_token_id,
+            chosen_tokenizer_id,
+        )
+        for candidate in top_logprobs:
+            add_candidate(
+                getattr(candidate, "token", ""),
+                float(getattr(candidate, "logprob", 0.0)),
+                getattr(candidate, "bytes", []) or [],
+                self._safe_optional_int(getattr(candidate, "token_id", None)),
+                self._safe_optional_int(getattr(candidate, "tokenizer_id", None)),
+            )
+
+        raw_probabilities = [
+            self._probability_from_logprob(logprob) for _, logprob, _, _, _ in deduped_candidates
+        ]
+        normalized_probabilities = self._normalize_probabilities(raw_probabilities)
+        entropy = self._calculate_entropy(normalized_probabilities)
+        ranked: list[dict[str, Any]] = []
+
+        for index, (
+            (token, logprob, token_bytes, token_id, tokenizer_id),
+            raw_probability,
+            normalized_probability,
+        ) in enumerate(
+            zip(
+                deduped_candidates,
+                raw_probabilities,
+                normalized_probabilities,
+                strict=False,
+            ),
+            start=1,
+        ):
+            decoded_contribution = self._decode_token_bytes(token, token_bytes)
+            cumulative_decoded_text = f"{context_before}{decoded_contribution}"
+            ranked.append(
+                {
+                    "token": token,
+                    "display_token": self._canonical_display_token(decoded_contribution),
+                    "token_bytes": token_bytes,
+                    "decoded_contribution": decoded_contribution,
+                    "cumulative_decoded_text": cumulative_decoded_text,
+                    "cumulative_token_ids": self._append_token_history(
+                        parent_cumulative_token_ids,
+                        token_id,
+                    ),
+                    "cumulative_log_probability": round(
+                        parent_cumulative_log_probability + logprob,
+                        6,
+                    ),
+                    "token_id": token_id,
+                    "tokenizer_id": tokenizer_id,
+                    "log_probability": round(logprob, 6),
+                    "raw_probability": raw_probability,
+                    "normalized_displayed_probability": normalized_probability,
+                    "rank": index,
+                    "latency_ms": latency_ms,
+                    "generation_step": generation_step,
+                    "context_after": cumulative_decoded_text,
+                }
+            )
+
+        return ranked, entropy
+
+    def _build_expansion_children_from_trace(
+        self,
+        *,
+        request: NodeExpansionRequest,
+        trace: TokenTrace,
+        latency_ms: int,
+    ) -> list[NodeExpansionCandidate]:
+        candidates = [
+            {
+                "token": trace.token,
+                "display_token": trace.display_token,
+                "token_bytes": trace.token_bytes,
+                "decoded_contribution": trace.decoded_contribution,
+                "cumulative_decoded_text": trace.cumulative_decoded_text,
+                "cumulative_token_ids": trace.cumulative_token_ids,
+                "cumulative_log_probability": trace.cumulative_log_probability,
+                "token_id": trace.token_id,
+                "tokenizer_id": trace.tokenizer_id,
+                "probability": trace.raw_probability,
+                "raw_probability": trace.raw_probability,
+                "normalized_displayed_probability": trace.normalized_displayed_probability,
+                "log_probability": trace.log_probability,
+                "rank": 1,
+                "generation_step": request.depth,
+                "context_after": trace.cumulative_decoded_text,
+            },
+            *[
+                {
+                    "token": candidate.token,
+                    "display_token": candidate.display_token
+                    or self._canonical_display_token(candidate.token),
+                    "token_bytes": candidate.token_bytes,
+                    "decoded_contribution": candidate.decoded_contribution
+                    or self._decode_token_bytes(candidate.token, candidate.token_bytes),
+                    "cumulative_decoded_text": candidate.cumulative_decoded_text
+                    or candidate.context_after
+                    or candidate.text_preview
+                    or f"{trace.context_before}{candidate.token}",
+                    "cumulative_token_ids": candidate.cumulative_token_ids,
+                    "cumulative_log_probability": candidate.cumulative_log_probability
+                    or round(
+                        trace.cumulative_log_probability
+                        - trace.log_probability
+                        + (candidate.log_probability or self._safe_log(candidate.probability)),
+                        6,
+                    ),
+                    "token_id": candidate.token_id,
+                    "tokenizer_id": candidate.tokenizer_id,
+                    "probability": candidate.raw_probability or candidate.probability,
+                    "raw_probability": candidate.raw_probability or candidate.probability,
+                    "normalized_displayed_probability": candidate.normalized_displayed_probability
+                    or candidate.probability,
+                    "log_probability": candidate.log_probability
+                    or self._safe_log(candidate.probability),
+                    "rank": candidate.rank or (index + 2),
+                    "generation_step": request.depth,
+                    "context_after": candidate.context_after
+                    or candidate.text_preview
+                    or f"{trace.context_before}{candidate.token}",
+                }
+                for index, candidate in enumerate(trace.alternatives)
+            ],
+        ]
+        children: list[NodeExpansionCandidate] = []
+
+        for candidate in candidates[: request.max_children]:
+            if candidate["generation_step"] != request.depth:
+                raise LLMScopeError(
+                    code="CONTINUATION_CONTEXT_MISMATCH",
+                    message="The returned child generation step does not match the canonical prefix length.",
+                    status_code=502,
+                )
+
+            if (
+                candidate["cumulative_token_ids"] is not None
+                and len(candidate["cumulative_token_ids"]) != request.depth + 1
+            ):
+                raise LLMScopeError(
+                    code="CONTINUATION_CONTEXT_MISMATCH",
+                    message="The returned child token history does not match the canonical decoding step.",
+                    status_code=502,
+                )
+
+            cumulative_probability = round(
+                self._clamp(
+                    request.cumulative_probability * candidate["raw_probability"],
+                    MIN_PROBABILITY,
+                    1.0,
+                ),
+                6,
+            )
+            child_id = self._make_step_id(
+                branch_id=request.parent_node_id,
+                token_index=request.depth,
+                token=candidate["token"],
+            )
+            children.append(
+                NodeExpansionCandidate(
+                    id=child_id,
+                    branch_id=child_id,
+                    parent_node_id=request.parent_node_id,
+                    model=request.model,
+                    source=trace.source,
+                    token=candidate["token"],
+                    display_token=candidate["display_token"],
+                    token_bytes=candidate["token_bytes"],
+                    decoded_contribution=candidate["decoded_contribution"],
+                    cumulative_decoded_text=candidate["cumulative_decoded_text"],
+                    cumulative_token_ids=candidate["cumulative_token_ids"],
+                    cumulative_log_probability=candidate["cumulative_log_probability"],
+                    token_id=candidate["token_id"],
+                    tokenizer_id=candidate["tokenizer_id"],
+                    probability=candidate["probability"],
+                    raw_probability=candidate["raw_probability"],
+                    normalized_displayed_probability=candidate[
+                        "normalized_displayed_probability"
+                    ],
+                    log_probability=candidate["log_probability"],
+                    entropy=trace.entropy,
+                    cumulative_probability=cumulative_probability,
+                    latency_ms=latency_ms,
+                    depth=request.depth + 1,
+                    rank=candidate["rank"],
+                    text_preview=candidate["cumulative_decoded_text"],
+                    context_before=trace.context_before,
+                    context_after=candidate["cumulative_decoded_text"],
+                    finish_reason=trace.finish_reason,
+                    rationale=None,
+                    generation_step=candidate["generation_step"],
+                    metadata={
+                        "parent_node_id": request.parent_node_id,
+                        "source": trace.source,
+                    },
+                )
+            )
+
+        self._log_expansion_candidates(
+            branch_id=request.parent_node_id,
+            context_suffix=trace.context_before,
+            children=children,
+        )
+        return children
+
+    def _build_demo_generation(
         self,
         *,
         request: GenerationRequest,
@@ -550,33 +825,8 @@ class GenerationService:
         keywords: list[str],
         intent: str,
         preset: str,
-    ) -> tuple[str, str, Any | None, int]:
-        client = self._get_client()
-
-        if client and request.model in MODEL_OPTION_MAP:
-            try:
-                instructions = self._build_live_instructions(
-                    preset=preset,
-                    intent=intent,
-                    variation=request.variation,
-                )
-                start_time = perf_counter()
-                response = client.responses.create(
-                    model=request.model,
-                    input=prompt,
-                    instructions=instructions,
-                    max_output_tokens=max(16, min(request.max_tokens, 1024)),
-                    temperature=request.temperature,
-                )
-                elapsed_ms = max(1, int((perf_counter() - start_time) * 1000))
-                completion = response.output_text.strip()
-
-                if completion:
-                    return completion, "live", response.usage, elapsed_ms
-            except Exception:
-                pass
-
-        completion = self._build_fallback_completion(
+    ) -> tuple[str, str, Any | None, int, list[TokenTrace]]:
+        completion = self._build_demo_completion(
             prompt=prompt,
             keywords=keywords,
             intent=intent,
@@ -584,14 +834,271 @@ class GenerationService:
             preset=preset,
             variation=request.variation,
         )
-        return completion, "fallback", None, 0
+        traces = self._build_demo_token_traces(
+            branch_id="main",
+            model=request.model,
+            prompt=prompt,
+            completion=completion,
+            temperature=request.temperature,
+            top_p=request.top_p,
+        )
+        return completion, "demo", None, max(1, len(traces) * 32), traces
+
+    def _build_demo_expansion(
+        self,
+        *,
+        request: NodeExpansionRequest,
+        prompt: str,
+        assistant_prefix: str,
+        intent: str,
+    ) -> tuple[list[NodeExpansionCandidate], float, str]:
+        demo_continuation = self._build_demo_completion(
+            prompt=f"{prompt}\n\nContinuation context: {assistant_prefix}",
+            keywords=self._extract_keywords(f"{prompt} {assistant_prefix}"),
+            intent=intent,
+            max_tokens=max(12, request.max_children),
+            preset=request.preset,
+            variation=request.variation,
+        )
+        demo_tokens = self._demo_tokenize(demo_continuation)
+        if not demo_tokens:
+            return [], 0.0, "demo"
+
+        candidate_specs: list[tuple[str, float]] = []
+        seen: set[str] = set()
+        for index, token in enumerate(demo_tokens):
+            if token in seen:
+                continue
+            seen.add(token)
+            probability = round(
+                self._clamp(0.68 - (index * 0.08), 0.06, 0.92),
+                6,
+            )
+            candidate_specs.append((token, probability))
+            if len(candidate_specs) == request.max_children:
+                break
+
+        normalized_probabilities = self._normalize_probabilities(
+            [probability for _, probability in candidate_specs]
+        )
+        entropy = self._calculate_entropy(normalized_probabilities)
+        children: list[NodeExpansionCandidate] = []
+
+        for rank, ((token, raw_probability), normalized_probability) in enumerate(
+            zip(candidate_specs, normalized_probabilities, strict=False),
+            start=1,
+        ):
+            child_id = self._make_step_id(
+                branch_id=request.parent_node_id,
+                token_index=request.depth,
+                token=token,
+            )
+            decoded_contribution = self._decode_token_bytes(token, self._token_bytes(token))
+            text_preview = f"{assistant_prefix}{decoded_contribution}"
+            children.append(
+                NodeExpansionCandidate(
+                    id=child_id,
+                    branch_id=child_id,
+                    parent_node_id=request.parent_node_id,
+                    model=request.model,
+                    source="demo",
+                    token=token,
+                    display_token=self._canonical_display_token(decoded_contribution),
+                    token_bytes=self._token_bytes(token),
+                    decoded_contribution=decoded_contribution,
+                    cumulative_decoded_text=text_preview,
+                    cumulative_token_ids=None,
+                    cumulative_log_probability=round(self._safe_log(raw_probability), 6),
+                    token_id=None,
+                    tokenizer_id=None,
+                    probability=raw_probability,
+                    raw_probability=raw_probability,
+                    normalized_displayed_probability=normalized_probability,
+                    log_probability=self._safe_log(raw_probability),
+                    entropy=entropy,
+                    cumulative_probability=round(
+                        self._clamp(
+                            request.cumulative_probability * raw_probability,
+                            MIN_PROBABILITY,
+                            1.0,
+                        ),
+                        6,
+                    ),
+                    latency_ms=24 + (rank * 6),
+                    depth=request.depth + 1,
+                    rank=rank,
+                    text_preview=text_preview,
+                    context_before=assistant_prefix,
+                    context_after=text_preview,
+                    finish_reason="demo",
+                    rationale="Demo candidate",
+                    generation_step=request.depth,
+                    metadata={
+                        "source": "demo",
+                        "parent_node_id": request.parent_node_id,
+                    },
+                )
+            )
+
+        return children, entropy, "demo"
+
+    def _build_demo_token_traces(
+        self,
+        *,
+        branch_id: str,
+        model: str,
+        prompt: str,
+        completion: str,
+        temperature: float,
+        top_p: float,
+    ) -> list[TokenTrace]:
+        tokens = self._demo_tokenize(completion)
+        pool = self._demo_candidate_pool(prompt=prompt, completion=completion)
+        traces: list[TokenTrace] = []
+        context_before = ""
+        cumulative_probability = 1.0
+        cumulative_log_probability = 0.0
+
+        for index, token in enumerate(tokens):
+            chosen_probability = round(
+                self._clamp(
+                    0.86 - (index * 0.02) - max(temperature - 0.7, 0) * 0.05 + (1 - top_p) * 0.03,
+                    0.08,
+                    0.96,
+                ),
+                6,
+            )
+            alternatives: list[tuple[str, float]] = []
+            alt_index = 0
+            while len(alternatives) < 3 and alt_index < len(pool):
+                candidate = pool[alt_index]
+                alt_index += 1
+                if candidate == token or any(existing[0] == candidate for existing in alternatives):
+                    continue
+                probability = round(
+                    self._clamp(chosen_probability - (0.12 + len(alternatives) * 0.08), 0.03, 0.74),
+                    6,
+                )
+                alternatives.append((candidate, probability))
+
+            raw_probabilities = [chosen_probability, *[probability for _, probability in alternatives]]
+            normalized_probabilities = self._normalize_probabilities(raw_probabilities)
+            entropy = self._calculate_entropy(normalized_probabilities)
+            decoded_contribution = self._decode_token_bytes(token, self._token_bytes(token))
+            context_after = f"{context_before}{decoded_contribution}"
+            cumulative_probability = round(
+                self._clamp(cumulative_probability * chosen_probability, MIN_PROBABILITY, 1.0),
+                6,
+            )
+            cumulative_log_probability = round(
+                cumulative_log_probability + self._safe_log(chosen_probability),
+                6,
+            )
+            step_id = self._make_step_id(branch_id=branch_id, token_index=index, token=token)
+            traces.append(
+                TokenTrace(
+                    id=step_id,
+                    branch_id=branch_id,
+                    parent_node_id="root" if index == 0 else traces[index - 1].id,
+                    model=model,
+                    source="demo",
+                    index=index,
+                    position=index,
+                    token=token,
+                    display_token=self._canonical_display_token(decoded_contribution),
+                    token_bytes=self._token_bytes(token),
+                    decoded_contribution=decoded_contribution,
+                    cumulative_decoded_text=context_after,
+                    cumulative_token_ids=None,
+                    cumulative_log_probability=cumulative_log_probability,
+                    token_id=None,
+                    tokenizer_id=None,
+                    probability=chosen_probability,
+                    raw_probability=chosen_probability,
+                    normalized_displayed_probability=normalized_probabilities[0],
+                    log_probability=self._safe_log(chosen_probability),
+                    entropy=entropy,
+                    cumulative_probability=cumulative_probability,
+                    latency_ms=26 + (index * 4),
+                    text_preview=context_after,
+                    context_before=context_before,
+                    context_after=context_after,
+                    finish_reason="demo",
+                    generation_step=index,
+                    metadata={
+                        "branch_id": branch_id,
+                        "source": "demo",
+                    },
+                    alternatives=[
+                        AlternativeCandidate(
+                            node_id=self._make_step_id(
+                                branch_id="root" if index == 0 else traces[index - 1].id,
+                                token_index=index,
+                                token=alt_token,
+                            ),
+                            token=alt_token,
+                            display_token=self._canonical_display_token(alt_token),
+                            token_bytes=self._token_bytes(alt_token),
+                            decoded_contribution=self._decode_token_bytes(
+                                alt_token,
+                                self._token_bytes(alt_token),
+                            ),
+                            cumulative_decoded_text=f"{context_before}{alt_token}",
+                            cumulative_token_ids=None,
+                            cumulative_log_probability=round(
+                                cumulative_log_probability
+                                - self._safe_log(chosen_probability)
+                                + self._safe_log(alt_probability),
+                                6,
+                            ),
+                            probability=alt_probability,
+                            raw_probability=alt_probability,
+                            normalized_displayed_probability=normalized_probabilities[alt_rank],
+                            log_probability=self._safe_log(alt_probability),
+                            entropy=entropy,
+                            latency_ms=24 + (alt_rank * 5),
+                            token_id=None,
+                            tokenizer_id=None,
+                            rank=alt_rank + 1,
+                            text_preview=f"{context_before}{alt_token}",
+                            context_before=context_before,
+                            context_after=f"{context_before}{alt_token}",
+                            rationale="Demo candidate",
+                            generation_step=index,
+                            metadata={
+                                "branch_id": "root" if index == 0 else traces[index - 1].id,
+                                "source": "demo",
+                            },
+                        )
+                        for alt_rank, (alt_token, alt_probability) in enumerate(alternatives, start=1)
+                    ],
+                )
+            )
+            context_before = context_after
+
+        return traces
+
+    def _demo_candidate_pool(self, *, prompt: str, completion: str) -> list[str]:
+        combined = [*self._demo_tokenize(completion), *self._demo_tokenize(prompt)]
+        pool: list[str] = []
+        seen: set[str] = set()
+
+        for token in combined:
+            normalized = token.strip().lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            if not token.startswith(" ") and pool:
+                token = f" {token.strip()}"
+            pool.append(token)
+
+        return pool
 
     def _build_live_instructions(self, *, preset: str, intent: str, variation: int) -> str:
         style_hint = RESPONSE_STYLE_HINTS[variation % len(RESPONSE_STYLE_HINTS)]
-
         return " ".join(
             [
-                "You are answering inside a minimal prompt-testing UI.",
+                "You are answering inside a model-inspection UI.",
                 "Be accurate, direct, and useful.",
                 "Avoid filler, vague generic language, and meta commentary.",
                 "If the user asks for a benchmark, range, definition, or recommendation, answer that concrete question first.",
@@ -601,7 +1108,7 @@ class GenerationService:
             ]
         )
 
-    def _build_fallback_completion(
+    def _build_demo_completion(
         self,
         *,
         prompt: str,
@@ -616,84 +1123,42 @@ class GenerationService:
         if self._looks_like_track_benchmark(prompt_lower):
             options = [
                 (
-                    "For a 16-year-old in the 400m, a solid time is often around 55 to 60 seconds, "
-                    "strong high-school competition is usually closer to 50 to 54, and breaking 50 "
-                    "is elite in many settings."
+                    "For a 16-year-old in the 400m, a solid range is often about 55 to 60 seconds, "
+                    "low-50s is strong, and sub-50 is elite in many high-school settings."
                 ),
                 (
-                    "A good 400m time for a 16-year-old is usually a range, not one number: roughly "
-                    "55 to 60 seconds is solid, low-50s is strong, and sub-50 is outstanding for most "
-                    "high-school runners."
-                ),
-                (
-                    "If you mean competitive high-school track, many 16-year-olds would see about 55 "
-                    "to 60 seconds as a good 400m mark, around 50 to 54 as very strong, and anything "
-                    "under 50 as elite."
+                    "A competitive range for a 16-year-old in the 400m is usually around 55 to 60 seconds, "
+                    "with faster times standing out more seriously."
                 ),
             ]
-            closing = (
-                " The right benchmark still depends a lot on sex, training age, and whether the goal is "
-                "general fitness or serious competition."
-            )
-            completion = options[variation % len(options)] + closing
-            return self._truncate_completion(completion, max_tokens)
+            return self._truncate_demo_completion(options[variation % len(options)], max_tokens)
 
         topic = self._topic_phrase(prompt, keywords)
-        first_focus = keywords[0] if keywords else "the main constraint"
-        second_focus = keywords[1] if len(keywords) > 1 else "the outcome"
+        focus = keywords[0] if keywords else "the main constraint"
+        secondary = keywords[1] if len(keywords) > 1 else "the result"
 
         if intent == "comparison":
-            first_sentence = (
-                f"For {topic}, the real difference is which option gives you more control versus more "
-                f"speed, and the better default depends on how much {first_focus} matters."
-            )
-            second_sentence = (
-                f"If you are choosing between them, compare latency, reliability, and how each one "
-                f"affects {second_focus}."
+            sentence = (
+                f"For {topic}, compare control, speed, and reliability first, then decide which option better supports {focus}."
             )
         elif intent == "debugging":
-            first_sentence = (
-                f"To debug {topic}, reproduce the smallest failing case first and trace the exact step "
-                f"where {first_focus} stops matching the expectation."
-            )
-            second_sentence = (
-                "Once you can see the break clearly, add a focused check or test so the same issue is "
-                "easy to catch next time."
+            sentence = (
+                f"To debug {topic}, reproduce the smallest failing case first, inspect the step where {focus} diverges, and add one focused check for {secondary}."
             )
         elif intent == "planning":
-            first_sentence = (
-                f"For {topic}, start with the thinnest version that works, measure {first_focus}, and "
-                "add complexity only where it clearly changes the result."
+            sentence = (
+                f"For {topic}, start with the smallest version that works, measure {focus}, and only add complexity when it changes {secondary}."
             )
-            second_sentence = (
-                f"That keeps the plan grounded while still giving you room to improve {second_focus}."
+        elif preset == "coach":
+            sentence = (
+                f"For {topic}, start with a clear baseline, then tighten the target as you get better data about {focus}."
             )
         else:
-            opening_variants = [
-                f"For {topic}, the best answer depends on the benchmark, context, and what counts as success around {first_focus}.",
-                f"The clearest way to think about {topic} is to anchor on a realistic range, then adjust for {first_focus} and context.",
-                f"A solid answer for {topic} starts with the direct benchmark, then adds the context that changes {first_focus}.",
-            ]
-            first_sentence = opening_variants[variation % len(opening_variants)]
-            if preset == "coach":
-                second_sentence = (
-                    f"Start with a simple baseline, then tighten the target as you get more data about {second_focus}."
-                )
-            elif preset == "coding":
-                second_sentence = (
-                    f"If this is for implementation, keep the default explicit and make the parts that affect {second_focus} easy to inspect."
-                )
-            else:
-                second_sentence = (
-                    f"That keeps the answer practical while still leaving room to refine {second_focus}."
-                )
+            sentence = (
+                f"For {topic}, start with the direct answer, then add the context that most changes {focus} and {secondary}."
+            )
 
-        single_sentence = any(
-            marker in prompt_lower
-            for marker in ("one sentence", "single sentence", "briefly", "short answer")
-        )
-        completion = first_sentence if single_sentence else f"{first_sentence} {second_sentence}"
-        return self._truncate_completion(completion, max_tokens)
+        return self._truncate_demo_completion(sentence, max_tokens)
 
     def _build_follow_ups(self, keywords: list[str], intent: str) -> list[str]:
         focus = keywords[0] if keywords else "this topic"
@@ -726,211 +1191,6 @@ class GenerationService:
             "Ask for the benchmark or decision rule in plain language.",
         ]
 
-    def _build_token_traces(
-        self,
-        *,
-        prompt: str,
-        completion: str,
-        keywords: list[str],
-        intent: str,
-        temperature: float,
-    ) -> list[TokenTrace]:
-        raw_tokens = self._tokenize(completion)
-        context_candidates = self._build_context_candidates(
-            prompt=prompt,
-            completion=completion,
-            keywords=keywords,
-        )
-        traces: list[TokenTrace] = []
-        cumulative_probability = 1.0
-
-        for position, token in enumerate(raw_tokens):
-            probability = self._score_token(
-                token=token,
-                position=position,
-                total_tokens=len(raw_tokens),
-                temperature=temperature,
-            )
-            cumulative_probability = round(
-                self._clamp(cumulative_probability * probability, 0.000001, 1.0),
-                6,
-            )
-            latency_ms = 26 + (len(token) * 4) + (position * 3) + int(temperature * 5)
-            alternatives = self._build_alternatives(
-                token=token,
-                actual_probability=probability,
-                keywords=keywords,
-                intent=intent,
-                position=position,
-                context_candidates=context_candidates,
-            )
-            entropy = self._calculate_entropy(
-                self._normalize_probabilities(
-                    [probability, *[candidate.probability for candidate in alternatives]]
-                )
-            )
-            text_preview = self._join_tokens(raw_tokens[: position + 1])
-            token_id = self._make_token_id(
-                token=token,
-                depth=position + 1,
-                rank=1,
-                preview=text_preview,
-            )
-
-            traces.append(
-                TokenTrace(
-                    id=f"token-{position + 1}",
-                    token=token,
-                    token_id=token_id,
-                    probability=probability,
-                    log_probability=self._safe_log(probability),
-                    entropy=entropy,
-                    cumulative_probability=cumulative_probability,
-                    latency_ms=latency_ms,
-                    position=position,
-                    text_preview=text_preview,
-                    alternatives=alternatives,
-                )
-            )
-
-        return traces
-
-    def _build_context_candidates(
-        self,
-        *,
-        prompt: str,
-        completion: str,
-        keywords: list[str],
-    ) -> list[tuple[str, str]]:
-        candidates: list[tuple[str, str]] = []
-        seen: set[str] = set()
-        prompt_focus_templates = [
-            "Returns to the prompt's focus on {word}.",
-            "Keeps the branch centered on {word}.",
-            "Re-anchors the choice around {word}.",
-        ]
-        answer_context_templates = [
-            "Keeps the answer anchored on {word}.",
-            "Stays aligned with the answer's emphasis on {word}.",
-            "Preserves the wording direction around {word}.",
-        ]
-        prompt_wording_templates = [
-            "Reuses the prompt wording around {word}.",
-            "Echoes the original phrasing built around {word}.",
-            "Pulls the branch back toward the prompt's wording on {word}.",
-        ]
-
-        for index, keyword in enumerate(keywords):
-            normalized = keyword.lower()
-            if normalized in seen:
-                continue
-            seen.add(normalized)
-            template = prompt_focus_templates[index % len(prompt_focus_templates)]
-            candidates.append((keyword, template.format(word=keyword)))
-
-        for index, word in enumerate(self._extract_keywords(completion, limit=8)):
-            normalized = word.lower()
-            if normalized in seen:
-                continue
-            seen.add(normalized)
-            template = answer_context_templates[index % len(answer_context_templates)]
-            candidates.append((word, template.format(word=word)))
-
-        first_prompt_words = self._extract_keywords(prompt, limit=10)
-        for index, word in enumerate(first_prompt_words):
-            normalized = word.lower()
-            if normalized in seen:
-                continue
-            seen.add(normalized)
-            template = prompt_wording_templates[index % len(prompt_wording_templates)]
-            candidates.append((word, template.format(word=word)))
-
-        return candidates
-
-    def _build_alternatives(
-        self,
-        *,
-        token: str,
-        actual_probability: float,
-        keywords: list[str],
-        intent: str,
-        position: int,
-        context_candidates: list[tuple[str, str]],
-    ) -> list[AlternativeCandidate]:
-        lower_token = token.lower()
-        candidate_pool: list[tuple[str, str]] = []
-
-        if re.fullmatch(r"[.,!?;:]", token):
-            candidate_pool.extend(
-                [
-                    (";", "Keeps the sentence open for another clause."),
-                    (",", "Softens the pause without ending the thought."),
-                    (".", "Ends the sentence earlier."),
-                ]
-            )
-        else:
-            candidate_pool.extend(ALTERNATIVE_MAP.get(lower_token, []))
-            candidate_pool.extend(context_candidates)
-            candidate_pool.extend(INTENT_FALLBACKS[intent])
-            if position == 0:
-                candidate_pool.extend(
-                    [
-                        ("For", "Starts with a direct setup."),
-                        ("A", "Starts from a more general opening."),
-                        ("In", "Starts with a contextual frame."),
-                    ]
-                )
-
-        alternatives: list[AlternativeCandidate] = []
-        seen_tokens = {lower_token}
-        base_probability = actual_probability - 0.12
-
-        for index, (candidate_token, rationale) in enumerate(candidate_pool):
-            normalized = candidate_token.lower()
-            if normalized in seen_tokens:
-                continue
-
-            seen_tokens.add(normalized)
-            formatted_token = self._match_case(token, candidate_token)
-            probability = round(
-                self._clamp(
-                    base_probability - (index * 0.04),
-                    0.04,
-                    max(actual_probability - 0.02, 0.05),
-                ),
-                4,
-            )
-            alternatives.append(
-                AlternativeCandidate(
-                    token=formatted_token,
-                    probability=probability,
-                    log_probability=self._safe_log(probability),
-                    latency_ms=max(18, 22 + (len(formatted_token) * 3) + (index * 5)),
-                    token_id=self._make_token_id(
-                        token=formatted_token,
-                        depth=position + 1,
-                        rank=index + 2,
-                        preview=formatted_token,
-                    ),
-                    text_preview=formatted_token,
-                    rationale=rationale,
-                )
-            )
-
-            if len(alternatives) == 3:
-                break
-
-        entropy = self._calculate_entropy(
-            self._normalize_probabilities(
-                [actual_probability, *[candidate.probability for candidate in alternatives]]
-            )
-        )
-
-        for candidate in alternatives:
-            candidate.entropy = entropy
-
-        return alternatives
-
     def _build_tree(self, tokens: list[TokenTrace]) -> tuple[TokenTreeNode, TreeSummary]:
         max_depth = min(6, len(tokens))
         branch_width = 1 + min(
@@ -940,8 +1200,12 @@ class GenerationService:
         root = TokenTreeNode(
             id="root",
             token="<start>",
-            token_id=self._make_token_id(token="<start>", depth=0, rank=1, preview=""),
+            display_token="<start>",
+            token_id=None,
+            tokenizer_id=None,
             probability=1.0,
+            raw_probability=1.0,
+            normalized_displayed_probability=1.0,
             log_probability=0.0,
             entropy=0.0,
             cumulative_probability=1.0,
@@ -954,14 +1218,13 @@ class GenerationService:
                 tokens=tokens,
                 position=0,
                 parent_cumulative=1.0,
-                prefix_tokens=[],
+                prefix_text="",
                 selected_path=True,
                 node_prefix="root",
                 max_depth=max_depth,
                 branch_width=branch_width,
             ),
         )
-
         return root, TreeSummary(
             max_depth=max_depth,
             branch_width=branch_width,
@@ -976,7 +1239,7 @@ class GenerationService:
         tokens: list[TokenTrace],
         position: int,
         parent_cumulative: float,
-        prefix_tokens: list[str],
+        prefix_text: str,
         selected_path: bool,
         node_prefix: str,
         max_depth: int,
@@ -986,57 +1249,71 @@ class GenerationService:
             return []
 
         source = tokens[position]
-        candidates: list[tuple[str, float, int, bool]] = [
-            (source.token, source.probability, source.latency_ms, True),
+        candidates: list[dict[str, Any]] = [
+            {
+                "token": source.token,
+                "display_token": source.display_token,
+                "probability": source.raw_probability,
+                "normalized_displayed_probability": source.normalized_displayed_probability,
+                "log_probability": source.log_probability,
+                "latency_ms": source.latency_ms,
+                "token_id": source.token_id,
+                "tokenizer_id": source.tokenizer_id,
+                "is_main_branch": True,
+            }
         ]
         candidates.extend(
-            (
-                alternative.token,
-                alternative.probability,
-                max(source.latency_ms - 5, 18) + (rank * 4),
-                False,
-            )
-            for rank, alternative in enumerate(source.alternatives[: branch_width - 1], start=1)
+            {
+                "token": alternative.token,
+                "display_token": alternative.display_token
+                or self._canonical_display_token(alternative.token),
+                "probability": alternative.raw_probability or alternative.probability,
+                "normalized_displayed_probability": alternative.normalized_displayed_probability
+                or alternative.probability,
+                "log_probability": alternative.log_probability
+                or self._safe_log(alternative.probability),
+                "latency_ms": alternative.latency_ms or source.latency_ms,
+                "token_id": alternative.token_id,
+                "tokenizer_id": alternative.tokenizer_id,
+                "is_main_branch": False,
+            }
+            for alternative in source.alternatives[: branch_width - 1]
         )
 
         children: list[TokenTreeNode] = []
-
-        for rank, (token, probability, latency_ms, is_main_branch) in enumerate(
-            candidates,
-            start=1,
-        ):
-            preview_tokens = [*prefix_tokens, token]
-            node_id = f"{node_prefix}.{position + 1}.{rank}"
+        for rank, candidate in enumerate(candidates, start=1):
+            preview = f"{prefix_text}{candidate['token']}"
             cumulative_probability = round(
-                self._clamp(parent_cumulative * probability, 0.000001, 1.0),
+                self._clamp(parent_cumulative * candidate["probability"], MIN_PROBABILITY, 1.0),
                 6,
             )
-            on_selected_path = selected_path and is_main_branch
-
+            on_selected_path = selected_path and candidate["is_main_branch"]
+            node_id = f"{node_prefix}.{position + 1}.{rank}"
             children.append(
                 TokenTreeNode(
                     id=node_id,
-                    token=token,
-                    token_id=self._make_token_id(
-                        token=token,
-                        depth=position + 1,
-                        rank=rank,
-                        preview=self._join_tokens(preview_tokens),
-                    ),
-                    probability=probability,
-                    log_probability=self._safe_log(probability),
+                    token=candidate["token"],
+                    display_token=candidate["display_token"],
+                    token_id=candidate["token_id"],
+                    tokenizer_id=candidate["tokenizer_id"],
+                    probability=candidate["probability"],
+                    raw_probability=candidate["probability"],
+                    normalized_displayed_probability=candidate[
+                        "normalized_displayed_probability"
+                    ],
+                    log_probability=candidate["log_probability"],
                     entropy=source.entropy,
                     cumulative_probability=cumulative_probability,
-                    latency_ms=latency_ms,
+                    latency_ms=candidate["latency_ms"],
                     depth=position + 1,
                     rank=rank,
-                    text_preview=self._join_tokens(preview_tokens),
+                    text_preview=preview,
                     is_selected_path=on_selected_path,
                     children=self._build_tree_children(
                         tokens=tokens,
                         position=position + 1,
                         parent_cumulative=cumulative_probability,
-                        prefix_tokens=preview_tokens,
+                        prefix_text=preview,
                         selected_path=on_selected_path,
                         node_prefix=node_id,
                         max_depth=max_depth,
@@ -1056,7 +1333,7 @@ class GenerationService:
         return sum(self._count_tree_paths(child) for child in node.children)
 
     def _estimate_prompt_tokens(self, prompt: str, keywords: list[str]) -> int:
-        return min(max(len(self._tokenize(prompt)) + len(keywords), 14), 256)
+        return min(max(len(self._demo_tokenize(prompt)) + len(keywords), 14), 256)
 
     def _estimate_cost(self, model: str, *, prompt_tokens: int, completion_tokens: int) -> float:
         pricing = MODEL_PRICING_USD_PER_1K.get(
@@ -1067,6 +1344,12 @@ class GenerationService:
             (prompt_tokens * pricing["input"]) + (completion_tokens * pricing["output"])
         ) / 1000
         return round(estimated, 6)
+
+    def _usage_value(self, usage: Any | None, field_name: str) -> int | None:
+        value = getattr(usage, field_name, None)
+        if isinstance(value, int):
+            return value
+        return None
 
     def _normalize_probabilities(self, probabilities: list[float]) -> list[float]:
         total = sum(probabilities)
@@ -1087,17 +1370,228 @@ class GenerationService:
         )
         return round(entropy, 6)
 
-    def _safe_log(self, probability: float) -> float:
-        return round(math.log(max(probability, 0.000001)), 6)
+    def _probability_from_logprob(self, logprob: float) -> float:
+        return round(math.exp(logprob), 6)
 
-    def _make_token_id(self, *, token: str, depth: int, rank: int, preview: str) -> int:
-        payload = f"{token}|{depth}|{rank}|{preview}".encode("utf-8")
-        return zlib.adler32(payload) & 0xFFFFFFFF
+    def _safe_log(self, probability: float) -> float:
+        return round(math.log(max(probability, MIN_PROBABILITY)), 6)
+
+    def _make_step_id(self, *, branch_id: str, token_index: int, token: str) -> str:
+        safe_token = self._encode_token(token)
+        return f"{branch_id}:{token_index}:{safe_token}"
+
+    def _encode_token(self, token: str) -> str:
+        checksum = zlib.adler32(token.encode("utf-8")) & 0xFFFFFFFF
+        return format(checksum, "08x")
+
+    def _display_token(self, token: str) -> str:
+        visible = token.replace("\t", "⇥").replace("\n", "↵\n")
+        if visible.startswith(" "):
+            visible = visible.replace(" ", "␠", 1)
+        return visible or "∅"
+
+    def _token_bytes(self, token: str) -> list[int]:
+        return list(token.encode("utf-8"))
+
+    def _decode_token_bytes(self, token: str, token_bytes: list[int]) -> str:
+        if token_bytes:
+            try:
+                decoded = bytes(token_bytes).decode("utf-8")
+                if decoded:
+                    return decoded
+            except UnicodeDecodeError:
+                pass
+        return token
+
+    def _append_token_history(
+        self,
+        parent_token_ids: list[int] | None,
+        token_id: int | None,
+    ) -> list[int] | None:
+        if parent_token_ids is None or token_id is None:
+            return None
+        return [*parent_token_ids, token_id]
+
+    def _safe_optional_int(self, value: Any | None) -> int | None:
+        return value if isinstance(value, int) and value >= 0 else None
+
+    def _canonical_display_token(self, token: str) -> str:
+        visible = token.replace("\t", "\u21E5").replace("\n", "\u21B5\n")
+        if visible.startswith(" "):
+            visible = visible.replace(" ", "\u2420", 1)
+        return visible or "\u2205"
+
+    def _build_continuation_context(
+        self,
+        request: NodeExpansionRequest,
+    ) -> ContinuationContext:
+        root_prompt = request.root_prompt
+        assistant_prefix = request.assistant_prefix
+        reconstructed_prompt = f"{root_prompt}{assistant_prefix}"
+        character_length = len(reconstructed_prompt)
+        utf8_length = len(reconstructed_prompt.encode("utf-8"))
+        token_count = request.depth
+        display_markers = ("\u2420", "\u21B5", "\u21E5", "â ", "â†µ", "â‡¥")
+
+        if request.parent_node_id == "root" and assistant_prefix:
+            raise LLMScopeError(
+                code="CONTINUATION_CONTEXT_MISMATCH",
+                message="The root prompt cannot include an assistant prefix before continuation.",
+                status_code=400,
+            )
+
+        if any(marker in assistant_prefix for marker in display_markers):
+            raise LLMScopeError(
+                code="CONTINUATION_CONTEXT_MISMATCH",
+                message="The continuation context contains display-only whitespace markers instead of raw decoded text.",
+                status_code=400,
+            )
+
+        if (
+            request.parent_node_id != "root"
+            and request.parent_token
+            and not assistant_prefix.endswith(request.parent_token)
+        ):
+            raise LLMScopeError(
+                code="CONTINUATION_CONTEXT_MISMATCH",
+                message="The assistant prefix no longer ends with the selected raw token.",
+                status_code=400,
+            )
+
+        if request.reconstructed_prompt and request.reconstructed_prompt != reconstructed_prompt:
+            raise LLMScopeError(
+                code="CONTINUATION_CONTEXT_MISMATCH",
+                message="The reconstructed continuation prompt no longer matches the raw-token graph context.",
+                status_code=400,
+            )
+
+        if (
+            request.expected_prompt_length is not None
+            and request.expected_prompt_length != character_length
+        ):
+            raise LLMScopeError(
+                code="CONTINUATION_CONTEXT_MISMATCH",
+                message="The reconstructed continuation character length does not match the graph validation data.",
+                status_code=400,
+            )
+
+        if request.expected_utf8_length is not None and request.expected_utf8_length != utf8_length:
+            raise LLMScopeError(
+                code="CONTINUATION_CONTEXT_MISMATCH",
+                message="The reconstructed continuation byte length does not match the graph validation data.",
+                status_code=400,
+            )
+
+        if request.expected_token_count is not None and request.expected_token_count != token_count:
+            raise LLMScopeError(
+                code="CONTINUATION_CONTEXT_MISMATCH",
+                message="The reconstructed continuation token count does not match the graph validation data.",
+                status_code=400,
+            )
+
+        return ContinuationContext(
+            root_prompt=root_prompt,
+            assistant_prefix=assistant_prefix,
+            reconstructed_prompt=reconstructed_prompt,
+            character_length=character_length,
+            utf8_length=utf8_length,
+            token_count=token_count,
+        )
+
+    def _log_token_steps(
+        self,
+        *,
+        branch_id: str,
+        context_suffix: str,
+        steps: list[TokenTrace],
+    ) -> None:
+        if self._settings.app_env.lower() != "development" or not steps:
+            return
+
+        for step in steps:
+            top_k_snapshot = [
+                {
+                    "token": step.token,
+                    "raw_logprob": step.log_probability,
+                    "converted_probability": step.raw_probability,
+                    "normalized_probability": step.normalized_displayed_probability,
+                },
+                *[
+                    {
+                        "token": candidate.token,
+                        "raw_logprob": candidate.log_probability,
+                        "converted_probability": (
+                            candidate.raw_probability
+                            if candidate.raw_probability is not None
+                            else candidate.probability
+                        ),
+                        "normalized_probability": candidate.normalized_displayed_probability,
+                    }
+                    for candidate in step.alternatives[:4]
+                ],
+            ]
+            probability_sum = round(
+                sum(item["converted_probability"] for item in top_k_snapshot),
+                6,
+            )
+            logger.info(
+                "probability-audit branch=%s index=%s chosen_token=%r raw_logprob=%s converted_probability=%s normalized_probability=%s top_k_probabilities=%s probability_sum=%s context_suffix=%r",
+                branch_id,
+                step.index,
+                step.token,
+                step.log_probability,
+                step.raw_probability,
+                step.normalized_displayed_probability,
+                top_k_snapshot,
+                probability_sum,
+                context_suffix[-120:],
+            )
+
+    def _log_expansion_candidates(
+        self,
+        *,
+        branch_id: str,
+        context_suffix: str,
+        children: list[NodeExpansionCandidate],
+    ) -> None:
+        if self._settings.app_env.lower() != "development" or not children:
+            return
+
+        probability_sum = round(sum(child.raw_probability for child in children), 6)
+        logger.info(
+            "node-expansion branch=%s chosen_token=%r raw_logprob=%s converted_probability=%s normalized_probability=%s top_k=%s probability_sum=%s context_suffix=%r",
+            branch_id,
+            children[0].token,
+            children[0].log_probability,
+            children[0].raw_probability,
+            children[0].normalized_displayed_probability,
+            [
+                {
+                    "token": child.token,
+                    "logprob": child.log_probability,
+                    "probability": child.raw_probability,
+                    "normalized_probability": child.normalized_displayed_probability,
+                }
+                for child in children
+            ],
+            probability_sum,
+            context_suffix[-120:],
+        )
+
+    def _raise_logprobs_unavailable(self) -> None:
+        raise LLMScopeError(
+            code="TOP_LOGPROBS_UNAVAILABLE",
+            message="This model response did not include token alternatives.",
+            status_code=409,
+        )
 
     def _looks_like_track_benchmark(self, prompt_lower: str) -> bool:
         return (
             ("good time" in prompt_lower or "fast time" in prompt_lower)
-            and any(event in prompt_lower for event in ("100m", "200m", "400m", "800m", "1600", "mile", "5k"))
+            and any(
+                event in prompt_lower
+                for event in ("100m", "200m", "400m", "800m", "1600", "mile", "5k")
+            )
         )
 
     def _topic_phrase(self, prompt: str, keywords: list[str]) -> str:
@@ -1161,67 +1655,15 @@ class GenerationService:
             "Explain the answer directly, then connect it to the practical context that matters most.",
         )
 
-    def _score_token(
-        self,
-        *,
-        token: str,
-        position: int,
-        total_tokens: int,
-        temperature: float,
-    ) -> float:
-        base_probability = 0.9
-        base_probability -= position * 0.016
-        base_probability -= max(temperature - 0.7, 0) * 0.08
-        base_probability += min(len(token), 10) * 0.006
+    def _truncate_demo_completion(self, completion: str, max_tokens: int) -> str:
+        tokens = self._demo_tokenize(completion)
+        if len(tokens) <= max_tokens:
+            return completion
+        truncated = "".join(tokens[:max_tokens]).rstrip(",;:-")
+        return f"{truncated}."
 
-        if token[:1].isupper():
-            base_probability += 0.03
-        if re.fullmatch(r"[.,!?;:]", token):
-            base_probability += 0.05
-        if position == total_tokens - 1:
-            base_probability += 0.02
-
-        return round(self._clamp(base_probability, 0.42, 0.97), 4)
-
-    def _truncate_completion(self, completion: str, max_tokens: int) -> str:
-        completion_tokens = self._tokenize(completion)
-
-        if len(completion_tokens) <= max_tokens:
-            return completion.strip()
-
-        return self._join_tokens(completion_tokens[:max_tokens]).rstrip(",;:-") + "."
-
-    def _tokenize(self, text: str) -> list[str]:
-        return TOKEN_PATTERN.findall(text)
-
-    def _join_tokens(self, tokens: list[str]) -> str:
-        text = ""
-
-        for token in tokens:
-            if not text:
-                text = token
-                continue
-
-            if re.fullmatch(r"[.,!?;:)\]]", token):
-                text = f"{text}{token}"
-                continue
-
-            if token in {"'s", "'re", "'ve", "'ll"}:
-                text = f"{text}{token}"
-                continue
-
-            if token in {"(", "[", "{"}:
-                text = f"{text} {token}"
-                continue
-
-            text = f"{text} {token}"
-
-        return text
-
-    def _match_case(self, source: str, candidate: str) -> str:
-        if source[:1].isupper():
-            return candidate[:1].upper() + candidate[1:]
-        return candidate
+    def _demo_tokenize(self, text: str) -> list[str]:
+        return DEMO_TOKEN_PATTERN.findall(text)
 
     def _clamp(self, value: float, minimum: float, maximum: float) -> float:
         return max(minimum, min(value, maximum))

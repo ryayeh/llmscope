@@ -1,24 +1,23 @@
 "use client";
 
+interface TokenContextAction {
+  destructive?: boolean;
+  disabled?: boolean;
+  label: string;
+  onSelect: () => void;
+}
+
 interface TokenContextMenuProps {
-  canCollapse: boolean;
-  canExpand: boolean;
-  onCenter: () => void;
+  actions: TokenContextAction[];
   onClose: () => void;
-  onCollapse: () => void;
-  onExpand: () => void;
   title: string;
   x: number;
   y: number;
 }
 
 export function TokenContextMenu({
-  canCollapse,
-  canExpand,
-  onCenter,
+  actions,
   onClose,
-  onCollapse,
-  onExpand,
   title,
   x,
   y,
@@ -32,19 +31,17 @@ export function TokenContextMenu({
       }}
     >
       <div className="context-menu__title">{title}</div>
-      {canExpand ? (
-        <button className="context-menu__action" onClick={onExpand} type="button">
-          Expand futures
+      {actions.map((action) => (
+        <button
+          key={action.label}
+          className={`context-menu__action${action.destructive ? " context-menu__action--destructive" : ""}`}
+          disabled={action.disabled}
+          onClick={action.onSelect}
+          type="button"
+        >
+          {action.label}
         </button>
-      ) : null}
-      {canCollapse ? (
-        <button className="context-menu__action" onClick={onCollapse} type="button">
-          Collapse subtree
-        </button>
-      ) : null}
-      <button className="context-menu__action" onClick={onCenter} type="button">
-        Center
-      </button>
+      ))}
       <button className="context-menu__action context-menu__action--muted" onClick={onClose} type="button">
         Close
       </button>

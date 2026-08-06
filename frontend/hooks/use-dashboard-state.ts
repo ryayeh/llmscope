@@ -288,9 +288,9 @@ export function useDashboardState() {
   };
 
   const handleSubmit = async () => {
-    const trimmedPrompt = prompt.trim();
+    const promptValue = prompt;
 
-    if (!trimmedPrompt) {
+    if (!promptValue.trim()) {
       setErrorMessage("Enter a prompt.");
       return;
     }
@@ -301,7 +301,7 @@ export function useDashboardState() {
     setIsLoading(true);
     setIsTypingResponse(false);
     setDisplayedCompletion("");
-    setPendingPrompt(trimmedPrompt);
+    setPendingPrompt(promptValue);
     setErrorMessage(null);
     setActiveTab("answer");
 
@@ -312,7 +312,7 @@ export function useDashboardState() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          prompt: trimmedPrompt,
+          prompt: promptValue,
           model,
           preset,
           temperature,
