@@ -1230,6 +1230,7 @@ function normalizeGraph(
   nodes: TokenFlowNode[],
   edges: ProbabilityFlowEdge[],
   branchChoices: Record<string, string>,
+  selectedNodeId: string | null,
   options?: { skipLayout?: boolean },
 ) {
   const childCounts = new Map<string, number>();
@@ -1239,9 +1240,15 @@ function normalizeGraph(
   }
 
   const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+  const activePathIdSet = new Set(buildActivePathIds(branchChoices, nodes));
+  const visibleAlternativeParentId =
+    selectedNodeId && nodeMap.get(selectedNodeId)?.data.kind === "token"
+      ? nodeMap.get(selectedNodeId)?.data.parentId ?? null
+      : null;
 
   const nextNodes = nodes.map((node) => {
     let hidden = false;
+    let currentId: string | null = node.id;
     let parentId = node.data.parentId;
 
     while (parentId) {
@@ -1256,6 +1263,16 @@ function normalizeGraph(
         break;
       }
 
+      if (
+        currentId !== null &&
+        !activePathIdSet.has(currentId) &&
+        parentId !== visibleAlternativeParentId
+      ) {
+        hidden = true;
+        break;
+      }
+
+      currentId = parentId;
       parentId = parent.data.parentId;
     }
 
@@ -2425,11 +2442,19 @@ function Workspace() {
       next.branchChoices ?? current.branchChoices,
       next.nodes ?? current.nodes,
     );
+    const selectionCandidate =
+      next.selectedNodeId && (next.nodes ?? current.nodes).some((node) => node.id === next.selectedNodeId)
+        ? next.selectedNodeId
+        : current.selectedNodeId &&
+            (next.nodes ?? current.nodes).some((node) => node.id === current.selectedNodeId)
+          ? current.selectedNodeId
+          : null;
     const normalizeStart = performance.now();
     const normalized = normalizeGraph(
       next.nodes ?? current.nodes,
       next.edges ?? current.edges,
       branchChoices,
+      selectionCandidate,
       { skipLayout: options?.skipLayout },
     );
     const normalizeDuration = performance.now() - normalizeStart;
@@ -2485,11 +2510,110 @@ function Workspace() {
 
   centerNodeRef.current = centerNode;
 
+  function materializeStoredAlternativesForSelection(nodeId: string) {
+    const node = nodesRef.current.find((currentNode) => currentNode.id === nodeId);
+
+    if (
+      !node ||
+      node.data.kind !== "token" ||
+      !node.data.parentId ||
+      node.data.topAlternatives.length === 0
+    ) {
+      return null;
+    }
+
+    const nextTokenGraph = materializeSourceAlternativesForNode(tokenGraphRef.current, nodeId);
+    const parentNodeId = node.data.parentId;
+    const parentNode = nodesRef.current.find((currentNode) => currentNode.id === parentNodeId);
+    const parentRecord = nextTokenGraph.nodesById[parentNodeId];
+
+    if (!parentNode || !parentRecord) {
+      return null;
+    }
+
+    setTokenGraph(nextTokenGraph);
+    tokenGraphRef.current = nextTokenGraph;
+
+    const responseChildIds = new Set(parentRecord.childIds);
+    const currentChildren = edgesRef.current
+      .filter((edge) => edge.source === parentNodeId)
+      .map((edge) => nodesRef.current.find((item) => item.id === edge.target))
+      .filter((item): item is TokenFlowNode => Boolean(item));
+    const staleNodeIds = new Set<string>();
+
+    for (const child of currentChildren) {
+      if (responseChildIds.has(child.id)) {
+        continue;
+      }
+
+      staleNodeIds.add(child.id);
+      for (const descendantId of collectDescendantIds(child.id, edgesRef.current)) {
+        staleNodeIds.add(descendantId);
+      }
+    }
+
+    const nextNodes = nodesRef.current.filter((currentNode) => !staleNodeIds.has(currentNode.id));
+    const nextEdges = edgesRef.current.filter(
+      (edge) =>
+        !staleNodeIds.has(edge.source) &&
+        !staleNodeIds.has(edge.target) &&
+        (edge.source !== parentNodeId || responseChildIds.has(edge.target)),
+    );
+    const existingNodeIndexById = new Map(
+      nextNodes.map((currentNode, index) => [currentNode.id, index]),
+    );
+    const materializedChildren = parentRecord.childIds
+      .map((childId) => nextTokenGraph.nodesById[childId])
+      .filter(
+        (candidate): candidate is TokenGraphNodeRecord =>
+          Boolean(candidate) && candidate.kind === "token" && candidate.parentId === parentNodeId,
+      );
+
+    for (const childRecord of materializedChildren) {
+      const existingIndex = existingNodeIndexById.get(childRecord.id);
+
+      if (typeof existingIndex === "number") {
+        nextNodes[existingIndex] = applyTokenGraphRecordToFlowNode(nextNodes[existingIndex], childRecord);
+      } else {
+        nextNodes.push(
+          applyTokenGraphRecordToFlowNode(
+            buildFlowNodeFromRecord(childRecord, parentNode),
+            childRecord,
+          ),
+        );
+      }
+
+      const nextEdge = buildEdge(
+        parentNodeId,
+        childRecord.id,
+        childRecord.probability,
+        childRecord.rank === 1,
+      );
+      const existingEdgeIndex = nextEdges.findIndex((edge) => edge.id === nextEdge.id);
+
+      if (existingEdgeIndex >= 0) {
+        nextEdges[existingEdgeIndex] = {
+          ...nextEdges[existingEdgeIndex],
+          data: nextEdge.data,
+        };
+      } else {
+        nextEdges.push(nextEdge);
+      }
+    }
+
+    return {
+      nodes: syncFlowNodesWithTokenGraph(nextNodes, nextTokenGraph),
+      edges: nextEdges,
+    };
+  }
+
   function activateReality(nodeId: string, options?: { pushHistory?: boolean }) {
     const nextChoices = buildRealityChoicesForNode(nodeId, nodesRef.current, branchChoicesRef.current);
+    const materialized = materializeStoredAlternativesForSelection(nodeId);
 
     applyTransition(
       {
+        ...(materialized ?? {}),
         branchChoices: nextChoices,
         selectedNodeId: nodeId,
       },
@@ -3038,103 +3162,16 @@ function Workspace() {
     nodeId: string,
     options?: { pushHistory?: boolean },
   ) {
-    const node = nodesRef.current.find((currentNode) => currentNode.id === nodeId);
+    const materialized = materializeStoredAlternativesForSelection(nodeId);
 
-    if (
-      !node ||
-      node.data.kind !== "token" ||
-      !node.data.parentId ||
-      node.data.topAlternatives.length === 0
-    ) {
+    if (!materialized) {
       return false;
-    }
-
-    setSelectedNodeId(nodeId);
-    setContextMenu(null);
-
-    const nextTokenGraph = materializeSourceAlternativesForNode(tokenGraphRef.current, nodeId);
-    const parentNodeId = node.data.parentId;
-    const parentNode = nodesRef.current.find((currentNode) => currentNode.id === parentNodeId);
-    const parentRecord = nextTokenGraph.nodesById[parentNodeId];
-
-    if (!parentNode || !parentRecord) {
-      return false;
-    }
-
-    setTokenGraph(nextTokenGraph);
-    tokenGraphRef.current = nextTokenGraph;
-
-    const responseChildIds = new Set(parentRecord.childIds);
-    const currentChildren = edgesRef.current
-      .filter((edge) => edge.source === parentNodeId)
-      .map((edge) => nodesRef.current.find((item) => item.id === edge.target))
-      .filter((item): item is TokenFlowNode => Boolean(item));
-    const staleNodeIds = new Set<string>();
-
-    for (const child of currentChildren) {
-      if (responseChildIds.has(child.id)) {
-        continue;
-      }
-
-      staleNodeIds.add(child.id);
-      for (const descendantId of collectDescendantIds(child.id, edgesRef.current)) {
-        staleNodeIds.add(descendantId);
-      }
-    }
-
-    const nextNodes = nodesRef.current.filter((currentNode) => !staleNodeIds.has(currentNode.id));
-    const nextEdges = edgesRef.current.filter(
-      (edge) =>
-        !staleNodeIds.has(edge.source) &&
-        !staleNodeIds.has(edge.target) &&
-        (edge.source !== parentNodeId || responseChildIds.has(edge.target)),
-    );
-    const existingNodeIndexById = new Map(
-      nextNodes.map((currentNode, index) => [currentNode.id, index]),
-    );
-    const materializedChildren = parentRecord.childIds
-      .map((childId) => nextTokenGraph.nodesById[childId])
-      .filter(
-        (candidate): candidate is TokenGraphNodeRecord =>
-          Boolean(candidate) && candidate.kind === "token" && candidate.parentId === parentNodeId,
-      );
-
-    for (const childRecord of materializedChildren) {
-      const existingIndex = existingNodeIndexById.get(childRecord.id);
-
-      if (typeof existingIndex === "number") {
-        nextNodes[existingIndex] = applyTokenGraphRecordToFlowNode(nextNodes[existingIndex], childRecord);
-      } else {
-        nextNodes.push(
-          applyTokenGraphRecordToFlowNode(
-            buildFlowNodeFromRecord(childRecord, parentNode),
-            childRecord,
-          ),
-        );
-      }
-
-      const nextEdge = buildEdge(
-        parentNodeId,
-        childRecord.id,
-        childRecord.probability,
-        childRecord.rank === 1,
-      );
-      const existingEdgeIndex = nextEdges.findIndex((edge) => edge.id === nextEdge.id);
-
-      if (existingEdgeIndex >= 0) {
-        nextEdges[existingEdgeIndex] = {
-          ...nextEdges[existingEdgeIndex],
-          data: nextEdge.data,
-        };
-      } else {
-        nextEdges.push(nextEdge);
-      }
     }
 
     applyTransition(
       {
-        nodes: syncFlowNodesWithTokenGraph(nextNodes, nextTokenGraph),
-        edges: nextEdges,
+        nodes: materialized.nodes,
+        edges: materialized.edges,
         selectedNodeId: nodeId,
       },
       options,
