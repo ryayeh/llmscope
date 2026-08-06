@@ -3,6 +3,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -254,6 +255,105 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
 
         self.assertEqual(caught.exception.code, "TOP_LOGPROBS_UNAVAILABLE")
         self.assertIn("did not include token alternatives", caught.exception.message)
+
+    def test_continuation_requests_respect_provider_minimum_and_keep_first_token(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeResponses:
+            def create(self, **kwargs):
+                captured.update(kwargs)
+                return SimpleNamespace(
+                    output=[
+                        SimpleNamespace(
+                            type="message",
+                            content=[
+                                SimpleNamespace(
+                                    type="output_text",
+                                    text=" old",
+                                    logprobs=[
+                                        SimpleNamespace(
+                                            token=" old",
+                                            logprob=math.log(0.41),
+                                            bytes=list(" old".encode("utf-8")),
+                                            token_id=None,
+                                            tokenizer_id=None,
+                                            top_logprobs=[
+                                                SimpleNamespace(
+                                                    token=" A",
+                                                    logprob=math.log(0.19),
+                                                    bytes=list(" A".encode("utf-8")),
+                                                    token_id=None,
+                                                    tokenizer_id=None,
+                                                )
+                                            ],
+                                        ),
+                                        SimpleNamespace(
+                                            token=" athlete",
+                                            logprob=math.log(0.27),
+                                            bytes=list(" athlete".encode("utf-8")),
+                                            token_id=None,
+                                            tokenizer_id=None,
+                                            top_logprobs=[
+                                                SimpleNamespace(
+                                                    token=" runner",
+                                                    logprob=math.log(0.12),
+                                                    bytes=list(" runner".encode("utf-8")),
+                                                    token_id=None,
+                                                    tokenizer_id=None,
+                                                )
+                                            ],
+                                        )
+                                    ],
+                                )
+                            ],
+                        )
+                    ],
+                    usage=None,
+                    status="completed",
+                )
+
+        request = NodeExpansionRequest(
+            root_prompt="Prompt",
+            model="gpt-4.1-mini",
+            preset="general",
+            temperature=0.7,
+            top_p=1.0,
+            parent_node_id="node-1",
+            parent_token="year",
+            assistant_prefix="A good 400m time for a 16 year",
+            depth=7,
+            cumulative_probability=0.5,
+            variation=0,
+            max_children=4,
+            demo_mode=False,
+        )
+
+        with patch.object(self.service, "_get_client", return_value=SimpleNamespace(responses=FakeResponses())):
+            steps, _, _ = self.service._request_live_steps(
+                request=request,
+                prompt="Prompt",
+                preset="general",
+                intent="benchmark",
+                assistant_prefix=request.assistant_prefix,
+                branch_id=request.parent_node_id,
+                parent_node_id=request.parent_node_id,
+                max_output_tokens=1,
+                top_logprobs=4,
+            )
+            response = self.service.expand_node(request)
+
+        self.assertEqual(captured["max_output_tokens"], 16)
+        self.assertIn(
+            "Continue the existing assistant response from the provided prefix exactly where it stops.",
+            str(captured["instructions"]),
+        )
+        self.assertEqual(steps[0].token, " old")
+        self.assertEqual(steps[1].token, " athlete")
+        self.assertEqual(steps[0].context_before, "A good 400m time for a 16 year")
+        self.assertEqual(steps[0].context_after, "A good 400m time for a 16 year old")
+
+        self.assertEqual(response.children[0].token, " old")
+        self.assertTrue(all(child.token != " athlete" for child in response.children))
 
 
 if __name__ == "__main__":

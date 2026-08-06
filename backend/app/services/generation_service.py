@@ -266,6 +266,17 @@ class GenerationService:
         assistant_prefix = context.assistant_prefix
         intent, _ = self._detect_intent(prompt.lower())
 
+        if self._settings.app_env.lower() == "development":
+            logger.debug(
+                "CONTINUATION REQUEST %s",
+                {
+                    "selected_node_id": request.parent_node_id,
+                    "selected_token": request.parent_token,
+                    "assistant_prefix": assistant_prefix,
+                    "reconstructed_prompt": context.reconstructed_prompt,
+                },
+            )
+
         if request.demo_mode:
             children, entropy, response_mode = self._build_demo_expansion(
                 request=request,
@@ -296,6 +307,24 @@ class GenerationService:
                 trace=source_trace,
                 latency_ms=latency_value,
             )
+            if self._settings.app_env.lower() == "development":
+                logger.debug(
+                    "CONTINUATION RESPONSE %s",
+                    {
+                        "selected_node_id": request.parent_node_id,
+                        "selected_token": request.parent_token,
+                        "first_returned_token": children[0].token if children else None,
+                        "first_returned_probability": children[0].probability if children else None,
+                        "first_returned_alternatives": [
+                            {
+                                "token": child.token,
+                                "probability": child.probability,
+                                "rank": child.rank,
+                            }
+                            for child in children[1:]
+                        ],
+                    },
+                )
             entropy = source_trace.entropy
             response_mode = "live"
             notes = "Next-token distribution returned by the provider for this exact branch context."
@@ -358,6 +387,7 @@ class GenerationService:
             preset=preset,
             intent=intent,
             variation=request.variation,
+            assistant_prefix=assistant_prefix,
         )
         input_items: list[dict[str, str]] = [
             {
@@ -375,6 +405,20 @@ class GenerationService:
             )
 
         effective_output_tokens = max(16, max_output_tokens)
+        if self._settings.app_env.lower() == "development" and assistant_prefix:
+            logger.debug(
+                "CONTINUATION API INPUT %s",
+                {
+                    "parent_node_id": parent_node_id,
+                    "exact_prompt": prompt,
+                    "assistant_prefix": assistant_prefix,
+                    "system_instructions": instructions,
+                    "input_items": input_items,
+                    "requested_max_output_tokens": max_output_tokens,
+                    "effective_max_output_tokens": effective_output_tokens,
+                    "top_logprobs": top_logprobs,
+                },
+            )
         start_time = perf_counter()
         try:
             response = client.responses.create(
@@ -399,6 +443,24 @@ class GenerationService:
 
         latency_ms = max(1, int((perf_counter() - start_time) * 1000))
         output_text, logprob_entries = self._extract_output_text_and_logprobs(response)
+        if self._settings.app_env.lower() == "development" and assistant_prefix:
+            first_entry = logprob_entries[0] if logprob_entries else None
+            logger.debug(
+                "CONTINUATION API OUTPUT %s",
+                {
+                    "parent_node_id": parent_node_id,
+                    "raw_returned_tokens": [getattr(entry, "token", "") for entry in logprob_entries],
+                    "raw_top_logprobs_token_0": [
+                        {
+                            "token": getattr(candidate, "token", ""),
+                            "logprob": float(getattr(candidate, "logprob", 0.0)),
+                            "bytes": getattr(candidate, "bytes", []) or [],
+                        }
+                        for candidate in (getattr(first_entry, "top_logprobs", []) or [])
+                    ],
+                    "output_text": output_text,
+                },
+            )
 
         if not logprob_entries:
             self._raise_logprobs_unavailable()
@@ -462,13 +524,14 @@ class GenerationService:
             chosen_token_bytes = getattr(entry, "bytes", []) or []
             chosen_token_id = self._safe_optional_int(getattr(entry, "token_id", None))
             chosen_tokenizer_id = self._safe_optional_int(getattr(entry, "tokenizer_id", None))
+            raw_top_logprobs = getattr(entry, "top_logprobs", []) or []
             ranked_candidates, entropy = self._build_ranked_candidates(
                 chosen_token=chosen_token,
                 chosen_logprob=chosen_logprob,
                 chosen_bytes=chosen_token_bytes,
                 chosen_token_id=chosen_token_id,
                 chosen_tokenizer_id=chosen_tokenizer_id,
-                top_logprobs=getattr(entry, "top_logprobs", []) or [],
+                top_logprobs=raw_top_logprobs,
                 context_before=context_before,
                 generation_step=output_step,
                 latency_ms=per_token_latency,
@@ -570,6 +633,38 @@ class GenerationService:
                 ],
             )
             traces.append(trace)
+
+            if self._settings.app_env.lower() == "development" and context_prefix:
+                logger.debug(
+                    "CONTINUATION TOKEN TRACE %s",
+                    {
+                        "branch_id": branch_id,
+                        "output_step": output_step,
+                        "raw_api_token": chosen_token,
+                        "raw_logprob": chosen_logprob,
+                        "raw_top_logprobs": [
+                            {
+                                "token": getattr(candidate, "token", ""),
+                                "logprob": float(getattr(candidate, "logprob", 0.0)),
+                                "bytes": getattr(candidate, "bytes", []) or [],
+                            }
+                            for candidate in raw_top_logprobs
+                        ],
+                        "parsed_generated_token": trace.token,
+                        "parsed_alternatives": [
+                            {
+                                "token": candidate.token,
+                                "logprob": candidate.log_probability,
+                                "probability": candidate.raw_probability,
+                                "rank": candidate.rank,
+                            }
+                            for candidate in trace.alternatives
+                        ],
+                        "context_before": trace.context_before,
+                        "context_through": trace.context_after,
+                    },
+                )
+
             context_before = trace.cumulative_decoded_text
             cumulative_log_probability = trace.cumulative_log_probability
             cumulative_token_ids = trace.cumulative_token_ids
@@ -1094,19 +1189,35 @@ class GenerationService:
 
         return pool
 
-    def _build_live_instructions(self, *, preset: str, intent: str, variation: int) -> str:
+    def _build_live_instructions(
+        self,
+        *,
+        preset: str,
+        intent: str,
+        variation: int,
+        assistant_prefix: str = "",
+    ) -> str:
         style_hint = RESPONSE_STYLE_HINTS[variation % len(RESPONSE_STYLE_HINTS)]
-        return " ".join(
-            [
-                "You are answering inside a model-inspection UI.",
-                "Be accurate, direct, and useful.",
-                "Avoid filler, vague generic language, and meta commentary.",
-                "If the user asks for a benchmark, range, definition, or recommendation, answer that concrete question first.",
-                PRESET_INSTRUCTIONS[preset],
-                style_hint,
-                f"Detected intent: {intent}.",
-            ]
-        )
+        parts = [
+            "You are answering inside a model-inspection UI.",
+            "Be accurate, direct, and useful.",
+            "Avoid filler, vague generic language, and meta commentary.",
+            "If the user asks for a benchmark, range, definition, or recommendation, answer that concrete question first.",
+            PRESET_INSTRUCTIONS[preset],
+            style_hint,
+            f"Detected intent: {intent}.",
+        ]
+
+        if assistant_prefix:
+            parts.extend(
+                [
+                    "Continue the existing assistant response from the provided prefix exactly where it stops.",
+                    "Do not restart the answer, repeat the prefix, or begin a new answer.",
+                    "Your next output must be the immediate continuation of that exact assistant text.",
+                ]
+            )
+
+        return " ".join(parts)
 
     def _build_demo_completion(
         self,

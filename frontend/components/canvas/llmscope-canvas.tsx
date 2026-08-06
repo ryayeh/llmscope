@@ -122,6 +122,7 @@ const MAX_BRANCH_CHILDREN = 4;
 const DEFAULT_PLAYBACK_SPEED = 1;
 const FRAME_BUDGET_MS = 16;
 const SHOULD_LOG_PERF = process.env.NODE_ENV !== "production";
+const SHOULD_LOG_CONTINUATION = process.env.NODE_ENV !== "production";
 
 type BackendState = "checking" | "online" | "offline";
 type SurfaceTheme = "midnight" | "graphite";
@@ -186,6 +187,14 @@ function logCanvasPerformance(metric: string, payload: Record<string, unknown>) 
   }
 
   console.debug(`[llmscope-perf] ${metric}`, payload);
+}
+
+function logContinuationDebug(metric: string, payload: Record<string, unknown>) {
+  if (!SHOULD_LOG_CONTINUATION) {
+    return;
+  }
+
+  console.debug(`[llmscope-continuation] ${metric}`, payload);
 }
 
 function wait(durationMs: number) {
@@ -2836,6 +2845,46 @@ function Workspace() {
       };
 
       const syncedNodes = syncFlowNodesWithTokenGraph(nextNodes, nextTokenGraph);
+
+      if (SHOULD_LOG_CONTINUATION) {
+        const syncedNodeMap = new Map(syncedNodes.map((currentNode) => [currentNode.id, currentNode]));
+        logContinuationDebug("flow-nodes", {
+          parentNodeId: nodeId,
+          createdNodes: payload.children.map((candidate) => {
+            const flowNode = syncedNodeMap.get(candidate.id);
+
+            return {
+              rawApiToken: candidate.token,
+              rawLogprob: candidate.log_probability,
+              parsedGeneratedToken: candidate.token,
+              parsedAlternatives: payload.children
+                .filter((otherCandidate) => otherCandidate.id !== candidate.id)
+                .map((otherCandidate) => ({
+                  token: otherCandidate.token,
+                  logprob: otherCandidate.log_probability,
+                  probability: otherCandidate.probability,
+                  rank: otherCandidate.rank,
+                })),
+              contextBefore: candidate.context_before,
+              contextThrough: candidate.context_after,
+              flowNode: flowNode
+                ? {
+                    id: flowNode.id,
+                    token: flowNode.data.tokenText,
+                    predictionId: flowNode.data.predictionId,
+                    topAlternatives: flowNode.data.topAlternatives.map((alternative) => ({
+                      token: alternative.token,
+                      probability: alternative.rawProbability ?? alternative.probability,
+                      rank: alternative.rank,
+                    })),
+                    contextBefore: flowNode.data.contextBefore,
+                    contextThrough: flowNode.data.contextAfter,
+                  }
+                : null,
+            };
+          }),
+        });
+      }
 
       applyTransition(
         {
