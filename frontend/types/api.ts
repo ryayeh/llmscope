@@ -5,6 +5,17 @@ export interface ApiErrorDetail {
 
 export type ContinuationMode = "exact" | "approximate";
 
+export interface ProviderCapabilitiesDetail {
+  supports_logprobs: boolean;
+  supports_entropy: boolean;
+  supports_attention: boolean;
+  supports_exact_continuation: boolean;
+  supports_streaming: boolean;
+  supports_branching: boolean;
+  supports_continuation: boolean;
+  minimum_output_tokens: number;
+}
+
 export interface AlternativeCandidate {
   node_id?: string | null;
   segment_id?: string | null;
@@ -15,7 +26,7 @@ export interface AlternativeCandidate {
   cumulative_decoded_text?: string | null;
   cumulative_token_ids?: number[] | null;
   cumulative_log_probability?: number | null;
-  probability: number;
+  probability?: number | null;
   raw_probability?: number | null;
   normalized_displayed_probability?: number | null;
   log_probability?: number | null;
@@ -40,6 +51,16 @@ export interface ModelOption {
   provider: string;
   group: string;
   status: string;
+  capabilities: ProviderCapabilitiesDetail;
+}
+
+export interface ProviderOption {
+  id: string;
+  label: string;
+  status: string;
+  status_message?: string | null;
+  recommended_models: string[];
+  capabilities: ProviderCapabilitiesDetail;
 }
 
 export interface PresetOption {
@@ -48,8 +69,10 @@ export interface PresetOption {
 }
 
 export interface ModelCatalogResponse {
+  default_provider: string;
   default_model: string;
   default_preset: string;
+  providers: ProviderOption[];
   models: ModelOption[];
   presets: PresetOption[];
 }
@@ -60,7 +83,7 @@ export interface TokenTrace {
   branch_id: string;
   parent_node_id?: string | null;
   model: string;
-  source: "openai" | "demo";
+  source: "openai" | "ollama" | "demo";
   index: number;
   position: number;
   token: string;
@@ -72,12 +95,12 @@ export interface TokenTrace {
   cumulative_log_probability?: number | null;
   token_id?: number | null;
   tokenizer_id?: number | null;
-  probability: number;
-  raw_probability: number;
-  normalized_displayed_probability: number;
-  log_probability: number;
-  entropy: number;
-  cumulative_probability: number;
+  probability?: number | null;
+  raw_probability?: number | null;
+  normalized_displayed_probability?: number | null;
+  log_probability?: number | null;
+  entropy?: number | null;
+  cumulative_probability?: number | null;
   latency_ms: number;
   text_preview: string;
   context_before: string;
@@ -95,12 +118,12 @@ export interface TokenTreeNode {
   display_token?: string | null;
   token_id?: number | null;
   tokenizer_id?: number | null;
-  probability: number;
+  probability?: number | null;
   raw_probability?: number | null;
   normalized_displayed_probability?: number | null;
-  log_probability: number;
-  entropy: number;
-  cumulative_probability: number;
+  log_probability?: number | null;
+  entropy?: number | null;
+  cumulative_probability?: number | null;
   latency_ms: number;
   depth: number;
   rank: number;
@@ -126,6 +149,7 @@ export interface PromptInsights {
 
 export interface RequestEcho {
   prompt: string;
+  provider?: string | null;
   model: string;
   preset: string;
   max_tokens: number;
@@ -146,12 +170,6 @@ export interface GenerationStats {
   generated_at: string;
 }
 
-export interface ProviderCapabilitiesDetail {
-  supports_native_continuation: boolean;
-  supports_token_logprobs: boolean;
-  minimum_output_tokens: number;
-}
-
 export interface GenerationResponse {
   mode: string;
   prompt_used: string;
@@ -163,10 +181,12 @@ export interface GenerationResponse {
   tree: TokenTreeNode;
   tree_summary: TreeSummary;
   stats: GenerationStats;
+  provider_capabilities: ProviderCapabilitiesDetail;
 }
 
 export interface NodeExpansionRequest {
   root_prompt: string;
+  provider?: string | null;
   model: string;
   preset: string;
   temperature: number;
@@ -196,7 +216,7 @@ export interface NodeExpansionCandidate {
   branch_id: string;
   parent_node_id: string;
   model: string;
-  source: "openai" | "demo";
+  source: "openai" | "ollama" | "demo";
   token: string;
   display_token: string;
   token_bytes?: number[] | null;

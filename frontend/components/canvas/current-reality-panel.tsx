@@ -26,14 +26,17 @@ export interface CurrentRealityTokenItem {
   rawToken: string;
   rank: number;
   step: number;
+  supportsLogprobs: boolean;
 }
 
 export interface CurrentRealityStats {
   branchDepth: number;
-  displayProbability: number;
-  entropy: number;
+  displayProbability: number | null;
+  entropy: number | null;
   latency: number;
-  rawProbability: number;
+  rawProbability: number | null;
+  supportsEntropy: boolean;
+  supportsLogprobs: boolean;
   tokenCount: number;
 }
 
@@ -47,6 +50,8 @@ interface CurrentRealityPanelProps {
   remainingProbabilityMass: number;
   selectedTokenId: string | null;
   stats: CurrentRealityStats;
+  supportsEntropy: boolean;
+  supportsLogprobs: boolean;
   summary: string;
   text: string;
   tokens: CurrentRealityTokenItem[];
@@ -79,8 +84,20 @@ function formatPercent(value: number) {
   return `${(Math.max(0, value) * 100).toFixed(1)}%`;
 }
 
-function formatNumber(value: number) {
-  return Number.isFinite(value) ? value.toFixed(4) : "0.0000";
+function formatMetricPercent(value: number | null, available: boolean) {
+  if (!available || typeof value !== "number") {
+    return "Unavailable";
+  }
+
+  return formatPercent(value);
+}
+
+function formatNumber(value: number | null, available = true) {
+  if (!available || typeof value !== "number" || !Number.isFinite(value)) {
+    return "Unavailable";
+  }
+
+  return value.toFixed(4);
 }
 
 function formatLatency(value: number) {
@@ -91,7 +108,7 @@ function getProbabilityModeLabel(mode: ProbabilityViewMode) {
   return mode === "normalized" ? "Normalized Top-K" : "Raw";
 }
 
-function normalizeTokenChipLabel(token: CurrentRealityTokenItem) {
+export function normalizeTokenChipLabel(token: CurrentRealityTokenItem) {
   const candidate = token.displayToken || token.decodedContribution || token.rawToken;
 
   if (candidate.trim()) {
@@ -102,6 +119,16 @@ function normalizeTokenChipLabel(token: CurrentRealityTokenItem) {
     .replace(/ /g, "␠")
     .replace(/\n/g, "↵\n")
     .replace(/\t/g, "⇥");
+}
+
+function formatTokenChipLabel(token: CurrentRealityTokenItem) {
+  const candidate = token.displayToken || token.decodedContribution || token.rawToken;
+
+  if (candidate.trim()) {
+    return candidate;
+  }
+
+  return candidate.replace(/ /g, "\u2420").replace(/\n/g, "\u21B5\n").replace(/\t/g, "\u21E5");
 }
 
 function renderInlineMarkdown(text: string) {
@@ -409,6 +436,8 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
   remainingProbabilityMass,
   selectedTokenId,
   stats,
+  supportsEntropy,
+  supportsLogprobs,
   summary,
   text,
   tokens,
@@ -477,10 +506,14 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
               >
                 {`Mode: ${continuationModeLabel}`}
               </span>
-              <span className="sentence-bar__badge">{modeLabel}</span>
+              {supportsLogprobs ? <span className="sentence-bar__badge">{modeLabel}</span> : null}
               <span className="sentence-bar__badge">{stats.tokenCount} tokens</span>
-              <span className="sentence-bar__badge">{formatPercent(stats.displayProbability)}</span>
-              {probabilityMode === "raw" && remainingProbabilityMass > 0 ? (
+              {supportsLogprobs ? (
+                <span className="sentence-bar__badge">
+                  {formatMetricPercent(stats.displayProbability, supportsLogprobs)}
+                </span>
+              ) : null}
+              {supportsLogprobs && probabilityMode === "raw" && remainingProbabilityMass > 0 ? (
                 <span className="sentence-bar__badge">
                   Other tokens {formatPercent(remainingProbabilityMass)}
                 </span>
@@ -595,12 +628,16 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
                             onMouseLeave={() => setHoveredTokenId((current) => (current === token.id ? null : current))}
                             style={
                               {
-                                "--sentence-strength": `${Math.max(token.displayProbability, 0.08)}`,
+                                "--sentence-strength": `${
+                                  token.supportsLogprobs
+                                    ? Math.max(token.displayProbability, 0.08)
+                                    : 0.38
+                                }`,
                               } as CSSProperties
                             }
                             type="button"
                           >
-                            {normalizeTokenChipLabel(token)}
+                            {formatTokenChipLabel(token)}
                           </button>
                         );
                       })
@@ -613,7 +650,7 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
                     <div className="reality-workspace__detail-grid">
                       <div>
                         <dt>Display</dt>
-                        <dd>{activeToken.displayToken || normalizeTokenChipLabel(activeToken)}</dd>
+                        <dd>{activeToken.displayToken || formatTokenChipLabel(activeToken)}</dd>
                       </div>
                       <div>
                         <dt>Decoded</dt>
@@ -621,11 +658,21 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
                       </div>
                       <div>
                         <dt>Displayed probability</dt>
-                        <dd>{formatPercent(activeToken.displayProbability)}</dd>
+                        <dd>
+                          {formatMetricPercent(
+                            activeToken.displayProbability,
+                            activeToken.supportsLogprobs,
+                          )}
+                        </dd>
                       </div>
                       <div>
                         <dt>Raw probability</dt>
-                        <dd>{formatPercent(activeToken.rawProbability)}</dd>
+                        <dd>
+                          {formatMetricPercent(
+                            activeToken.rawProbability,
+                            activeToken.supportsLogprobs,
+                          )}
+                        </dd>
                       </div>
                       <div>
                         <dt>Rank</dt>
@@ -644,15 +691,15 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
                 <div className="reality-workspace__detail-grid">
                   <div>
                     <dt>Probability</dt>
-                    <dd>{formatPercent(stats.displayProbability)}</dd>
+                    <dd>{formatMetricPercent(stats.displayProbability, supportsLogprobs)}</dd>
                   </div>
                   <div>
                     <dt>Raw probability</dt>
-                    <dd>{formatPercent(stats.rawProbability)}</dd>
+                    <dd>{formatMetricPercent(stats.rawProbability, supportsLogprobs)}</dd>
                   </div>
                   <div>
                     <dt>Entropy</dt>
-                    <dd>{formatNumber(stats.entropy)}</dd>
+                    <dd>{formatNumber(stats.entropy, supportsEntropy)}</dd>
                   </div>
                   <div>
                     <dt>Latency</dt>
@@ -668,11 +715,13 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
                   </div>
                   <div>
                     <dt>Top-K coverage</dt>
-                    <dd>{formatPercent(topKCoverage)}</dd>
+                    <dd>{supportsLogprobs ? formatPercent(topKCoverage) : "Unavailable"}</dd>
                   </div>
                   <div>
                     <dt>Other tokens</dt>
-                    <dd>{formatPercent(remainingProbabilityMass)}</dd>
+                    <dd>
+                      {supportsLogprobs ? formatPercent(remainingProbabilityMass) : "Unavailable"}
+                    </dd>
                   </div>
                 </div>
               ) : null}
@@ -708,12 +757,16 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
                         onMouseLeave={() => setHoveredTokenId((current) => (current === token.id ? null : current))}
                         style={
                           {
-                            "--sentence-strength": `${Math.max(token.displayProbability, 0.08)}`,
+                            "--sentence-strength": `${
+                              token.supportsLogprobs
+                                ? Math.max(token.displayProbability, 0.08)
+                                : 0.38
+                            }`,
                           } as CSSProperties
                         }
                         type="button"
                       >
-                        {normalizeTokenChipLabel(token)}
+                        {formatTokenChipLabel(token)}
                       </button>
                     );
                   })

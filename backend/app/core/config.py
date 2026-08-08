@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     app_version: str = Field(default="0.1.0", alias="APP_VERSION")
     default_model: str = Field(default="gpt-4.1-mini", alias="DEFAULT_MODEL")
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
+    ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
     backend_cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: [
             "http://localhost:3000",

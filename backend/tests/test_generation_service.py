@@ -10,6 +10,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.core.errors import LLMScopeError
+from app.models.provider import ModelProvider
 from app.schemas.generation import (
     AlternativeCandidate,
     ContinueGenerationRequest,
@@ -377,6 +378,7 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
                     supports_native_continuation=True,
                     supports_token_logprobs=True,
                     minimum_output_tokens=16,
+                    supports_continuation=True,
                 ),
             ),
         ):
@@ -498,6 +500,7 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
                     supports_native_continuation=True,
                     supports_token_logprobs=True,
                     minimum_output_tokens=16,
+                    supports_continuation=True,
                 ),
             ),
         ):
@@ -646,6 +649,7 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
                     supports_native_continuation=False,
                     supports_token_logprobs=True,
                     minimum_output_tokens=16,
+                    supports_continuation=True,
                 ),
             ),
         ):
@@ -747,6 +751,77 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
         self.assertEqual(provider_call_count, 3)
         self.assertEqual(branch_response.continuation_mode, ContinuationMode.APPROXIMATE)
         self.assertEqual(branch_response.children[0].token, " branch")
+
+    def test_model_catalog_surfaces_offline_ollama_provider_state(self) -> None:
+        with patch.object(
+            self.service._ollama_provider,
+            "discover_models",
+            return_value=SimpleNamespace(
+                provider_name=ModelProvider.OLLAMA,
+                provider_label="Ollama",
+                status="offline",
+                status_message=(
+                    "Ollama is not running.\n\nInstall from https://ollama.com/\n\nThen run:\n\nollama serve"
+                ),
+                recommended_models=["qwen2.5:3b", "phi3", "gemma3", "llama3.2"],
+                capabilities=ProviderCapabilities(
+                    supports_native_continuation=False,
+                    supports_token_logprobs=False,
+                    minimum_output_tokens=1,
+                    supports_entropy=False,
+                    supports_attention=False,
+                    supports_streaming=True,
+                    supports_branching=False,
+                    supports_continuation=False,
+                ),
+                models=[],
+            ),
+        ):
+            catalog = self.service.list_models(force_refresh=True)
+
+        ollama_provider = next(
+            provider for provider in catalog.providers if provider.id == ModelProvider.OLLAMA
+        )
+        self.assertEqual(ollama_provider.status, "offline")
+        self.assertIn("ollama serve", ollama_provider.status_message or "")
+        self.assertIn("qwen2.5:3b", ollama_provider.recommended_models)
+
+    def test_ollama_generation_marks_tokens_approximate_and_probabilities_unavailable(self) -> None:
+        with patch.object(
+            self.service,
+            "_resolve_model_option",
+            return_value=SimpleNamespace(provider=ModelProvider.OLLAMA),
+        ), patch.object(
+            self.service._ollama_provider,
+            "generate",
+            return_value=SimpleNamespace(
+                completion="A solid time",
+                prompt_tokens=6,
+                completion_tokens=3,
+                total_tokens=9,
+                latency_ms=42,
+                finish_reason="stop",
+            ),
+        ):
+            response = self.service.build_response(
+                GenerationRequest(
+                    prompt="What is a good 400m time?",
+                    provider=ModelProvider.OLLAMA,
+                    model="phi3",
+                    demo_mode=False,
+                )
+            )
+
+        self.assertEqual(response.request.provider, ModelProvider.OLLAMA)
+        self.assertEqual(response.stats.provider, ModelProvider.OLLAMA)
+        self.assertFalse(response.provider_capabilities.supports_logprobs)
+        self.assertGreater(len(response.tokens), 0)
+        for token in response.tokens:
+            self.assertEqual(token.continuation_mode, ContinuationMode.APPROXIMATE)
+            self.assertIsNone(token.probability)
+            self.assertIsNone(token.raw_probability)
+            self.assertIsNone(token.log_probability)
+            self.assertEqual(token.metadata.get("provider"), ModelProvider.OLLAMA.value)
 
 
 if __name__ == "__main__":

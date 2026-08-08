@@ -8,7 +8,7 @@ import type {
   TokenGraphState,
 } from "../lib/token-graph";
 import { applyExpansionToTokenGraph, materializeSourceAlternativesForNode } from "../lib/token-graph";
-import type { ContinuationMode, NodeExpansionResponse } from "../types/api";
+import type { ContinuationMode, NodeExpansionResponse, ProviderCapabilitiesDetail } from "../types/api";
 
 const encoder = new TextEncoder();
 const expansionOptions: ApplyExpansionOptions = {
@@ -19,6 +19,17 @@ const expansionOptions: ApplyExpansionOptions = {
   topP: 1,
   variation: 1,
   demoMode: true,
+};
+
+const DEFAULT_PROVIDER_CAPABILITIES: ProviderCapabilitiesDetail = {
+  supports_logprobs: true,
+  supports_entropy: true,
+  supports_attention: false,
+  supports_exact_continuation: false,
+  supports_streaming: false,
+  supports_branching: true,
+  supports_continuation: true,
+  minimum_output_tokens: 16,
 };
 
 function encodeBytes(token: string) {
@@ -130,6 +141,7 @@ function makeNode(args: {
     reasoningFocusTerms: [],
     branchRationale: null,
     metadata: {},
+    providerCapabilities: DEFAULT_PROVIDER_CAPABILITIES,
     sourceAlternatives: args.sourceAlternatives ?? [],
     alternativesExpanded: false,
     distributionRequested: false,

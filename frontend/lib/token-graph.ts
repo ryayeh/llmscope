@@ -4,6 +4,7 @@ import type {
   GenerationResponse,
   NodeExpansionCandidate,
   NodeExpansionResponse,
+  ProviderCapabilitiesDetail,
   TokenTrace,
 } from "../types/api";
 
@@ -84,6 +85,7 @@ export interface TokenGraphNodeRecord {
   reasoningFocusTerms: string[];
   branchRationale: string | null;
   metadata: Record<string, string | number | boolean | null>;
+  providerCapabilities: ProviderCapabilitiesDetail;
   sourceAlternatives: TokenGraphAlternativeRecord[];
   alternativesExpanded: boolean;
   distributionRequested: boolean;
@@ -160,6 +162,16 @@ export interface ApplyExpansionOptions {
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 const MIN_GRAPH_PROBABILITY = 0.000001;
+const DEFAULT_PROVIDER_CAPABILITIES: ProviderCapabilitiesDetail = {
+  supports_logprobs: true,
+  supports_entropy: true,
+  supports_attention: false,
+  supports_exact_continuation: false,
+  supports_streaming: false,
+  supports_branching: true,
+  supports_continuation: true,
+  minimum_output_tokens: 16,
+};
 
 function encodeTokenId(timestamp: string, suffix: string) {
   return `${timestamp}:${suffix}`;
@@ -412,6 +424,7 @@ function buildSiblingAlternativeNode(
     reasoningFocusTerms: selectedNode.reasoningFocusTerms,
     branchRationale: alternative.rationale ?? null,
     metadata: normalizeMetadata(alternative.metadata),
+    providerCapabilities: selectedNode.providerCapabilities,
     sourceAlternatives: [],
     alternativesExpanded: true,
     distributionRequested: existing?.distributionRequested ?? false,
@@ -427,9 +440,10 @@ function mapAlternativeCandidate(
   const decodedContribution =
     candidate.decoded_contribution ??
     buildCanonicalDecodedContribution(candidate.token, tokenBytes);
-  const rawProbability = candidate.raw_probability ?? candidate.probability;
+  const rawProbability = candidate.raw_probability ?? candidate.probability ?? 0;
   const logProbability =
-    candidate.log_probability ?? Math.log(Math.max(rawProbability, MIN_GRAPH_PROBABILITY));
+    candidate.log_probability ??
+    (rawProbability > 0 ? Math.log(Math.max(rawProbability, MIN_GRAPH_PROBABILITY)) : null);
   const cumulativeDecodedText = buildCanonicalCumulativeDecodedText(
     parentNode,
     decodedContribution,
@@ -461,7 +475,7 @@ function mapAlternativeCandidate(
     tokenBytes,
     tokenId: candidate.token_id ?? null,
     tokenizerId: candidate.tokenizer_id ?? null,
-    probability: candidate.probability,
+    probability: candidate.probability ?? rawProbability,
     rawProbability,
     normalizedDisplayedProbability:
       candidate.normalized_displayed_probability ?? null,
@@ -487,7 +501,7 @@ function buildInitialTokenNode(
   const decodedContribution =
     trace.decoded_contribution ??
     buildCanonicalDecodedContribution(trace.token, tokenBytes);
-  const logProbability = trace.log_probability;
+  const logProbability = trace.log_probability ?? 0;
   const cumulativeDecodedText = buildCanonicalCumulativeDecodedText(
     parentNode,
     decodedContribution,
@@ -521,14 +535,14 @@ function buildInitialTokenNode(
     tokenId: trace.token_id ?? null,
     tokenizerId: trace.tokenizer_id ?? null,
     logProbability,
-    probability: trace.probability,
-    rawProbability: trace.raw_probability,
-    normalizedDisplayedProbability: trace.normalized_displayed_probability,
+    probability: trace.probability ?? 0,
+    rawProbability: trace.raw_probability ?? 0,
+    normalizedDisplayedProbability: trace.normalized_displayed_probability ?? 0,
     rank: 1,
-    entropy: trace.entropy,
+    entropy: trace.entropy ?? 0,
     latencyMs: trace.latency_ms,
-    cumulativeProbability: trace.cumulative_probability,
-    branchProbability: trace.raw_probability,
+    cumulativeProbability: trace.cumulative_probability ?? 0,
+    branchProbability: trace.raw_probability ?? 0,
     finishReason: trace.finish_reason ?? null,
     generationDepth: trace.position + 1,
     generationStep: trace.generation_step ?? trace.position,
@@ -548,6 +562,7 @@ function buildInitialTokenNode(
     reasoningFocusTerms: payload.insights.focus_terms,
     branchRationale: null,
     metadata: normalizeMetadata(trace.metadata ?? null),
+    providerCapabilities: payload.provider_capabilities ?? DEFAULT_PROVIDER_CAPABILITIES,
     sourceAlternatives: trace.alternatives.map((candidate) =>
       mapAlternativeCandidate(candidate, parentNode),
     ),
@@ -568,7 +583,7 @@ function buildExpansionNode(
   const decodedContribution =
     candidate.decoded_contribution ??
     buildCanonicalDecodedContribution(candidate.token, tokenBytes);
-  const logProbability = candidate.log_probability;
+  const logProbability = candidate.log_probability ?? 0;
   const cumulativeDecodedText = buildCanonicalCumulativeDecodedText(
     parentNode,
     decodedContribution,
@@ -602,14 +617,14 @@ function buildExpansionNode(
     tokenId: candidate.token_id ?? null,
     tokenizerId: candidate.tokenizer_id ?? null,
     logProbability,
-    probability: candidate.probability,
-    rawProbability: candidate.raw_probability,
-    normalizedDisplayedProbability: candidate.normalized_displayed_probability,
+    probability: candidate.probability ?? 0,
+    rawProbability: candidate.raw_probability ?? 0,
+    normalizedDisplayedProbability: candidate.normalized_displayed_probability ?? 0,
     rank: candidate.rank,
-    entropy: candidate.entropy,
+    entropy: candidate.entropy ?? 0,
     latencyMs: candidate.latency_ms,
-    cumulativeProbability: candidate.cumulative_probability,
-    branchProbability: candidate.raw_probability,
+    cumulativeProbability: candidate.cumulative_probability ?? 0,
+    branchProbability: candidate.raw_probability ?? 0,
     finishReason: candidate.finish_reason ?? null,
     generationDepth: candidate.depth,
     generationStep: candidate.generation_step ?? Math.max(candidate.depth - 1, 0),
@@ -629,6 +644,7 @@ function buildExpansionNode(
     reasoningFocusTerms: parentNode.reasoningFocusTerms,
     branchRationale: candidate.rationale ?? null,
     metadata: normalizeMetadata(candidate.metadata ?? null),
+    providerCapabilities: parentNode.providerCapabilities,
     sourceAlternatives: [],
     alternativesExpanded: false,
     distributionRequested: false,
@@ -699,6 +715,7 @@ export function createTokenGraphFromGeneration(payload: GenerationResponse): Tok
       source: payload.mode,
       branch_id: "root",
     },
+    providerCapabilities: payload.provider_capabilities ?? DEFAULT_PROVIDER_CAPABILITIES,
     sourceAlternatives: [],
     alternativesExpanded: false,
     distributionRequested: false,

@@ -8,12 +8,34 @@ import type {
   ModelCatalogResponse,
   ModelOption,
   PresetOption,
+  ProviderCapabilitiesDetail,
   TokenTreeNode,
 } from "@/types/api";
 
+const DEFAULT_PROVIDER_CAPABILITIES: ProviderCapabilitiesDetail = {
+  supports_logprobs: true,
+  supports_entropy: true,
+  supports_attention: false,
+  supports_exact_continuation: false,
+  supports_streaming: false,
+  supports_branching: true,
+  supports_continuation: true,
+  minimum_output_tokens: 16,
+};
+
 const FALLBACK_MODEL_CATALOG: ModelCatalogResponse = {
+  default_provider: "openai",
   default_model: "gpt-4.1-mini",
   default_preset: "general",
+  providers: [
+    {
+      id: "openai",
+      label: "OpenAI",
+      status: "ready",
+      recommended_models: [],
+      capabilities: DEFAULT_PROVIDER_CAPABILITIES,
+    },
+  ],
   models: [
     {
       id: "gpt-4o-mini",
@@ -21,6 +43,7 @@ const FALLBACK_MODEL_CATALOG: ModelCatalogResponse = {
       provider: "openai",
       group: "OpenAI",
       status: "ready",
+      capabilities: DEFAULT_PROVIDER_CAPABILITIES,
     },
     {
       id: "gpt-4.1-mini",
@@ -28,6 +51,7 @@ const FALLBACK_MODEL_CATALOG: ModelCatalogResponse = {
       provider: "openai",
       group: "OpenAI",
       status: "ready",
+      capabilities: DEFAULT_PROVIDER_CAPABILITIES,
     },
     {
       id: "gpt-4o",
@@ -35,6 +59,7 @@ const FALLBACK_MODEL_CATALOG: ModelCatalogResponse = {
       provider: "openai",
       group: "OpenAI",
       status: "ready",
+      capabilities: DEFAULT_PROVIDER_CAPABILITIES,
     },
     {
       id: "gpt-4.1",
@@ -42,6 +67,7 @@ const FALLBACK_MODEL_CATALOG: ModelCatalogResponse = {
       provider: "openai",
       group: "OpenAI",
       status: "ready",
+      capabilities: DEFAULT_PROVIDER_CAPABILITIES,
     },
   ],
   presets: [
@@ -154,6 +180,7 @@ function findModelOption(models: ModelOption[], modelId: string): ModelOption {
       provider: "openai",
       group: "Custom",
       status: "ready",
+      capabilities: DEFAULT_PROVIDER_CAPABILITIES,
     }
   );
 }

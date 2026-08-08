@@ -24,7 +24,11 @@ import { useDashboardState } from "@/hooks/use-dashboard-state";
 import { cn } from "@/lib/utils";
 import type { ModelOption } from "@/types/api";
 
-function formatPercent(value: number) {
+function formatPercent(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "Unavailable";
+  }
+
   return `${(value * 100).toFixed(value < 0.1 ? 1 : 0)}%`;
 }
 

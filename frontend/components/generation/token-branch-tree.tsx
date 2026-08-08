@@ -58,7 +58,11 @@ const HEAD_ACCENTS: HeadAccent[] = [
   { label: "Head 4", rgb: "168 85 247", textClass: "text-violet-700" },
 ];
 
-function formatPercent(value: number) {
+function formatPercent(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "Unavailable";
+  }
+
   return `${(value * 100).toFixed(value < 0.1 ? 1 : 0)}%`;
 }
 
@@ -83,7 +87,11 @@ function nodeHasVisibleDescendant(node: TokenTreeNode, searchQuery: string): boo
   return node.children.some((child) => nodeHasVisibleDescendant(child, searchQuery));
 }
 
-function getLikelihoodLabel(probability: number) {
+function getLikelihoodLabel(probability: number | null | undefined) {
+  if (typeof probability !== "number") {
+    return "Unavailable";
+  }
+
   if (probability >= 0.8) {
     return "High";
   }
@@ -438,7 +446,7 @@ export function TokenBranchTree({
                             const isExpanded = expandedNodeIds.includes(entry.node.id);
                             const isSelected = entry.node.id === selectedNodeId;
                             const localLikelihood = getLikelihoodLabel(entry.node.probability);
-                            const cardGlow = 0.08 + entry.node.cumulative_probability * 0.2;
+                            const cardGlow = 0.08 + (entry.node.cumulative_probability ?? 0) * 0.2;
                             const isHeadNode = entry.node.depth === 1;
                             const visibleCount = headSummaryMap.get(entry.node.id);
 
@@ -540,7 +548,7 @@ export function TokenBranchTree({
                                           className="h-full rounded-full"
                                           style={{
                                             background: `linear-gradient(90deg, rgb(${accent.rgb} / 0.68), rgb(${accent.rgb}))`,
-                                            width: `${Math.max(entry.node.probability * 100, 4)}%`,
+                                            width: `${Math.max((entry.node.probability ?? 0) * 100, 4)}%`,
                                           }}
                                         />
                                       </div>
@@ -556,7 +564,7 @@ export function TokenBranchTree({
                                           className="h-full rounded-full"
                                           style={{
                                             background: `linear-gradient(90deg, rgb(${accent.rgb} / 0.32), rgb(${accent.rgb} / 0.82))`,
-                                            width: `${Math.max(entry.node.cumulative_probability * 100, 3)}%`,
+                                            width: `${Math.max((entry.node.cumulative_probability ?? 0) * 100, 3)}%`,
                                           }}
                                         />
                                       </div>

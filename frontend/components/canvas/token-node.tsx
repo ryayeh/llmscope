@@ -15,10 +15,12 @@ function getNodeTone({
   isActiveReality,
   probability,
   selected,
+  supportsLogprobs,
 }: {
   isActiveReality: boolean;
   probability: number;
   selected: boolean;
+  supportsLogprobs: boolean;
 }) {
   if (selected) {
     return {
@@ -35,6 +37,15 @@ function getNodeTone({
       border: "rgba(56, 189, 248, 0.4)",
       glow: "rgba(56, 189, 248, 0.28)",
       rail: "linear-gradient(90deg, rgba(56, 189, 248, 1), rgba(14, 165, 233, 0.82))",
+    };
+  }
+
+  if (!supportsLogprobs) {
+    return {
+      accent: "#94a3b8",
+      border: "rgba(148, 163, 184, 0.26)",
+      glow: "rgba(148, 163, 184, 0.16)",
+      rail: "linear-gradient(90deg, rgba(148, 163, 184, 0.86), rgba(100, 116, 139, 0.72))",
     };
   }
 
@@ -56,10 +67,13 @@ function getNodeTone({
 }
 
 export function TokenNode({ data, selected }: NodeProps<TokenFlowNode>) {
+  const supportsLogprobs = data.providerCapabilities.supports_logprobs;
+  const supportsBranching = data.providerCapabilities.supports_branching;
   const tone = getNodeTone({
     isActiveReality: data.isActiveReality || data.kind === "prompt",
     probability: data.displayProbability,
     selected,
+    supportsLogprobs,
   });
   const style = {
     "--node-accent": tone.accent,
@@ -97,21 +111,30 @@ export function TokenNode({ data, selected }: NodeProps<TokenFlowNode>) {
         ) : null}
       </div>
 
-      <div className="token-node__probability">{formatPercent(data.displayProbability)}</div>
+      <div className="token-node__probability">
+        {supportsLogprobs ? formatPercent(data.displayProbability) : "Unavailable"}
+      </div>
 
       <div className="token-node__rail">
         <div
           className="token-node__rail-fill"
           style={{
-            width: `${Math.max(data.displayProbability * 100, data.kind === "prompt" ? 100 : 10)}%`,
+            width: `${
+              supportsLogprobs
+                ? Math.max(data.displayProbability * 100, data.kind === "prompt" ? 100 : 10)
+                : 100
+            }%`,
           }}
         />
       </div>
 
       <div className="token-node__hover">
         <p className="token-node__hover-label">
-          {formatPercent(data.displayProbability)} |{" "}
-          {data.probabilityMode === "normalized" ? "Normalized Top-K" : "Raw"}
+          {supportsLogprobs
+            ? `${formatPercent(data.displayProbability)} | ${
+                data.probabilityMode === "normalized" ? "Normalized Top-K" : "Raw"
+              }`
+            : "Probability unavailable"}
         </p>
         <div className="token-node__hover-grid">
           <p>
@@ -124,11 +147,11 @@ export function TokenNode({ data, selected }: NodeProps<TokenFlowNode>) {
           </p>
           <p>
             <strong>Shown p</strong>
-            <span>{formatPercent(data.displayProbability)}</span>
+            <span>{supportsLogprobs ? formatPercent(data.displayProbability) : "Unavailable"}</span>
           </p>
           <p>
             <strong>Raw p</strong>
-            <span>{formatPercent(data.rawProbability)}</span>
+            <span>{supportsLogprobs ? formatPercent(data.rawProbability) : "Unavailable"}</span>
           </p>
           <p>
             <strong>Bytes</strong>
@@ -157,7 +180,11 @@ export function TokenNode({ data, selected }: NodeProps<TokenFlowNode>) {
         </div>
         <p className="token-node__hover-preview">{data.contextAfter || data.textPreview}</p>
         <p className="token-node__hover-hint">
-          {data.kind === "prompt" ? "Double-click to open futures" : "Double-click to continue"}
+          {supportsBranching
+            ? data.kind === "prompt"
+              ? "Double-click to open futures"
+              : "Double-click to expand alternatives"
+            : "Selection only"}
         </p>
       </div>
     </div>

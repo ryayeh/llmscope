@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from app.models.provider import ModelProvider
+from app.schemas.provider_capabilities import ProviderCapabilitiesDetail
 
 
 class ContinuationMode(str, Enum):
@@ -29,7 +30,7 @@ class AlternativeCandidate(BaseModel):
     cumulative_decoded_text: str | None = None
     cumulative_token_ids: list[int] | None = None
     cumulative_log_probability: float | None = None
-    probability: float = Field(..., ge=0, le=1)
+    probability: float | None = Field(default=None, ge=0, le=1)
     raw_probability: float | None = Field(default=None, ge=0, le=1)
     normalized_displayed_probability: float | None = Field(default=None, ge=0, le=1)
     log_probability: float | None = None
@@ -54,7 +55,7 @@ class TokenTrace(BaseModel):
     branch_id: str
     parent_node_id: str | None = None
     model: str
-    source: Literal["openai", "demo"]
+    source: Literal["openai", "ollama", "demo"]
     index: int = Field(..., ge=0)
     position: int = Field(..., ge=0)
     token: str
@@ -63,15 +64,15 @@ class TokenTrace(BaseModel):
     decoded_contribution: str
     cumulative_decoded_text: str
     cumulative_token_ids: list[int] | None = None
-    cumulative_log_probability: float
+    cumulative_log_probability: float | None = None
     token_id: int | None = Field(default=None, ge=0)
     tokenizer_id: int | None = Field(default=None, ge=0)
-    probability: float = Field(..., ge=0, le=1)
-    raw_probability: float = Field(..., ge=0, le=1)
-    normalized_displayed_probability: float = Field(..., ge=0, le=1)
-    log_probability: float
-    entropy: float = Field(..., ge=0)
-    cumulative_probability: float = Field(..., ge=0, le=1)
+    probability: float | None = Field(default=None, ge=0, le=1)
+    raw_probability: float | None = Field(default=None, ge=0, le=1)
+    normalized_displayed_probability: float | None = Field(default=None, ge=0, le=1)
+    log_probability: float | None = None
+    entropy: float | None = Field(default=None, ge=0)
+    cumulative_probability: float | None = Field(default=None, ge=0, le=1)
     latency_ms: int = Field(..., ge=0)
     text_preview: str
     context_before: str
@@ -89,12 +90,12 @@ class TokenTreeNode(BaseModel):
     display_token: str | None = None
     token_id: int | None = Field(default=None, ge=0)
     tokenizer_id: int | None = Field(default=None, ge=0)
-    probability: float = Field(..., ge=0, le=1)
+    probability: float | None = Field(default=None, ge=0, le=1)
     raw_probability: float | None = Field(default=None, ge=0, le=1)
     normalized_displayed_probability: float | None = Field(default=None, ge=0, le=1)
-    log_probability: float
-    entropy: float = Field(..., ge=0)
-    cumulative_probability: float = Field(..., ge=0, le=1)
+    log_probability: float | None = None
+    entropy: float | None = Field(default=None, ge=0)
+    cumulative_probability: float | None = Field(default=None, ge=0, le=1)
     latency_ms: int = Field(..., ge=0)
     depth: int = Field(..., ge=0)
     rank: int = Field(..., ge=1)
@@ -120,6 +121,7 @@ class PromptInsights(BaseModel):
 
 class RequestEcho(BaseModel):
     prompt: str = Field(..., min_length=1)
+    provider: ModelProvider | None = None
     model: str
     preset: str = Field(default="general")
     max_tokens: int = Field(..., ge=1, le=4096)
@@ -140,14 +142,9 @@ class GenerationStats(BaseModel):
     generated_at: datetime
 
 
-class ProviderCapabilitiesDetail(BaseModel):
-    supports_native_continuation: bool
-    supports_token_logprobs: bool
-    minimum_output_tokens: int = Field(..., ge=1)
-
-
 class GenerationRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=10000)
+    provider: ModelProvider | None = None
     model: str = Field(default="gpt-4.1-mini")
     preset: str = Field(default="general")
     max_tokens: int = Field(default=256, ge=1, le=4096)
@@ -175,6 +172,7 @@ class GenerationResponse(BaseModel):
     tree: TokenTreeNode
     tree_summary: TreeSummary
     stats: GenerationStats
+    provider_capabilities: ProviderCapabilitiesDetail
 
 
 class NodeExpansionRequest(BaseModel):
@@ -185,6 +183,7 @@ class NodeExpansionRequest(BaseModel):
         validation_alias=AliasChoices("root_prompt", "prompt"),
         serialization_alias="root_prompt",
     )
+    provider: ModelProvider | None = None
     model: str = Field(default="gpt-4.1-mini")
     preset: str = Field(default="general")
     temperature: float = Field(default=0.7, ge=0, le=2)
@@ -226,7 +225,7 @@ class NodeExpansionCandidate(BaseModel):
     branch_id: str
     parent_node_id: str
     model: str
-    source: Literal["openai", "demo"]
+    source: Literal["openai", "ollama", "demo"]
     token: str
     display_token: str
     token_bytes: list[int] = Field(default_factory=list)

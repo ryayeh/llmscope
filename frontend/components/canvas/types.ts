@@ -1,6 +1,6 @@
 import type { Edge, Node } from "@xyflow/react";
 
-import type { ContinuationMode } from "@/types/api";
+import type { ContinuationMode, ProviderCapabilitiesDetail } from "@/types/api";
 
 export type ProbabilityViewMode = "normalized" | "raw";
 
@@ -96,6 +96,7 @@ export interface TokenNodeData extends Record<string, unknown> {
   reasoningFocusTerms: string[];
   branchRationale: string | null;
   metadata: Record<string, string | number | boolean | null>;
+  providerCapabilities: ProviderCapabilitiesDetail;
   rawLogits: number[] | null;
   topAlternatives: InspectorAlternative[];
   sourceAlternatives: InspectorAlternative[];

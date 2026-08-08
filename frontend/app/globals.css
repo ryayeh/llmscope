@@ -829,6 +829,24 @@ button {
   text-transform: uppercase;
 }
 
+.explorer-note {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.36);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.explorer-note p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
 .inspector-panel__content {
   display: flex;
   flex: 1;
@@ -2254,6 +2272,13 @@ button {
   background: rgba(255, 255, 255, 0.035);
   font-size: 10px;
   letter-spacing: 0.04em;
+}
+
+.llmscope-app .explorer-note {
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  font-size: 11px;
 }
 
 .llmscope-app .inspector-panel__content {

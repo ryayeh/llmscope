@@ -63,6 +63,11 @@ import {
   type TokenGraphState,
 } from "@/lib/token-graph";
 import {
+  findCompatibleModelId,
+  getModelsForProvider,
+  type ProviderSelectionId,
+} from "@/lib/provider-selection";
+import {
   getContinuationModePresentation,
   isApproximateBoundary,
 } from "@/lib/continuation-mode";
@@ -75,11 +80,54 @@ import type {
   ModelOption,
   NodeExpansionResponse,
   PresetOption,
+  ProviderCapabilitiesDetail,
+  ProviderOption,
 } from "@/types/api";
 
+const OPENAI_PROVIDER_CAPABILITIES: ProviderCapabilitiesDetail = {
+  supports_logprobs: true,
+  supports_entropy: true,
+  supports_attention: false,
+  supports_exact_continuation: false,
+  supports_streaming: false,
+  supports_branching: true,
+  supports_continuation: true,
+  minimum_output_tokens: 16,
+};
+
+const OLLAMA_PROVIDER_CAPABILITIES: ProviderCapabilitiesDetail = {
+  supports_logprobs: false,
+  supports_entropy: false,
+  supports_attention: false,
+  supports_exact_continuation: false,
+  supports_streaming: true,
+  supports_branching: false,
+  supports_continuation: false,
+  minimum_output_tokens: 1,
+};
+
 const FALLBACK_MODEL_CATALOG: ModelCatalogResponse = {
+  default_provider: "openai",
   default_model: "gpt-4.1-mini",
   default_preset: "general",
+  providers: [
+    {
+      id: "openai",
+      label: "OpenAI",
+      status: "ready",
+      recommended_models: [],
+      capabilities: OPENAI_PROVIDER_CAPABILITIES,
+    },
+    {
+      id: "ollama",
+      label: "Ollama",
+      status: "offline",
+      status_message:
+        "Ollama is not running.\n\nInstall from https://ollama.com/\n\nThen run:\n\nollama serve",
+      recommended_models: ["qwen2.5:3b", "phi3", "gemma3", "llama3.2"],
+      capabilities: OLLAMA_PROVIDER_CAPABILITIES,
+    },
+  ],
   models: [
     {
       id: "gpt-4o-mini",
@@ -87,6 +135,7 @@ const FALLBACK_MODEL_CATALOG: ModelCatalogResponse = {
       provider: "openai",
       group: "OpenAI",
       status: "ready",
+      capabilities: OPENAI_PROVIDER_CAPABILITIES,
     },
     {
       id: "gpt-4.1-mini",
@@ -94,6 +143,7 @@ const FALLBACK_MODEL_CATALOG: ModelCatalogResponse = {
       provider: "openai",
       group: "OpenAI",
       status: "ready",
+      capabilities: OPENAI_PROVIDER_CAPABILITIES,
     },
     {
       id: "gpt-4o",
@@ -101,6 +151,7 @@ const FALLBACK_MODEL_CATALOG: ModelCatalogResponse = {
       provider: "openai",
       group: "OpenAI",
       status: "ready",
+      capabilities: OPENAI_PROVIDER_CAPABILITIES,
     },
     {
       id: "gpt-4.1",
@@ -108,6 +159,7 @@ const FALLBACK_MODEL_CATALOG: ModelCatalogResponse = {
       provider: "openai",
       group: "OpenAI",
       status: "ready",
+      capabilities: OPENAI_PROVIDER_CAPABILITIES,
     },
   ],
   presets: [
@@ -132,6 +184,7 @@ const SHOULD_LOG_CONTINUATION = process.env.NODE_ENV !== "production";
 
 type BackendState = "checking" | "online" | "offline";
 type SurfaceTheme = "midnight" | "graphite";
+type ProviderId = ProviderSelectionId;
 
 type DecoratedInspectorAlternative = InspectorAlternative & {
   difference: number;
@@ -187,6 +240,15 @@ const edgeTypes = {
   probabilityEdge: ProbabilityEdge,
 };
 
+const DEFAULT_EDGE_OPTIONS = {
+  animated: true,
+  type: "probabilityEdge",
+} as const;
+
+const FIT_VIEW_OPTIONS = {
+  padding: 0.18,
+} as const;
+
 function logCanvasPerformance(metric: string, payload: Record<string, unknown>) {
   if (!SHOULD_LOG_PERF) {
     return;
@@ -213,11 +275,19 @@ function formatPercent(value: number) {
   return `${(value * 100).toFixed(1)}%`;
 }
 
-function formatProbability(value: number) {
+function formatProbability(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "Unavailable";
+  }
+
   return value.toFixed(4);
 }
 
-function formatNumber(value: number) {
+function formatNumber(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "Unavailable";
+  }
+
   return value.toFixed(4);
 }
 
@@ -380,6 +450,20 @@ function findModelOption(models: ModelOption[], modelId: string): ModelOption {
       provider: "openai",
       group: "Custom",
       status: "ready",
+      capabilities: OPENAI_PROVIDER_CAPABILITIES,
+    }
+  );
+}
+
+function findProviderOption(providers: ProviderOption[], providerId: string): ProviderOption {
+  return (
+    providers.find((item) => item.id === providerId) ?? {
+      id: providerId,
+      label: providerId,
+      status: "ready",
+      recommended_models: [],
+      capabilities:
+        providerId === "ollama" ? OLLAMA_PROVIDER_CAPABILITIES : OPENAI_PROVIDER_CAPABILITIES,
     }
   );
 }
@@ -425,8 +509,8 @@ function mapTraceAlternativesToInspector(alternatives: AlternativeCandidate[]) {
       candidate.token,
     cumulativeTokenIds: candidate.cumulative_token_ids ?? null,
     cumulativeLogProbability: candidate.cumulative_log_probability ?? null,
-    probability: candidate.probability,
-    rawProbability: candidate.raw_probability ?? candidate.probability,
+    probability: candidate.probability ?? 0,
+    rawProbability: candidate.raw_probability ?? candidate.probability ?? null,
     normalizedDisplayedProbability:
       candidate.normalized_displayed_probability ?? null,
     logProbability: candidate.log_probability ?? null,
@@ -534,6 +618,7 @@ function applyTokenGraphRecordToFlowNode(
       requestDemoMode: record.requestDemoMode,
       responseMode: record.responseMode,
       sourceNotes: record.sourceNotes,
+      providerCapabilities: record.providerCapabilities,
       reasoningIntent: record.reasoningIntent,
       reasoningStrategy: record.reasoningStrategy,
       reasoningFocusTerms: record.reasoningFocusTerms,
@@ -569,6 +654,7 @@ function buildPromptNode({
   topP,
   variation,
   demoMode,
+  providerCapabilities,
 }: {
   model: string;
   preset: string;
@@ -580,6 +666,7 @@ function buildPromptNode({
   topP: number;
   variation: number;
   demoMode: boolean;
+  providerCapabilities: ProviderCapabilitiesDetail;
 }): TokenFlowNode {
   const metrics = getNodeMetrics(prompt);
   return {
@@ -646,6 +733,7 @@ function buildPromptNode({
       requestDemoMode: demoMode,
       responseMode,
       sourceNotes: reasoning.notes,
+      providerCapabilities,
       reasoningIntent: reasoning.intent,
       reasoningStrategy: reasoning.strategy,
       reasoningFocusTerms: reasoning.focusTerms,
@@ -709,6 +797,7 @@ function buildTokenNode({
   variation,
   demoMode,
   metadata,
+  providerCapabilities,
 }: {
   branchRationale: string | null;
   continuationMode: ContinuationMode;
@@ -753,6 +842,7 @@ function buildTokenNode({
   variation: number;
   demoMode: boolean;
   metadata?: Record<string, string | number | boolean | null>;
+  providerCapabilities: ProviderCapabilitiesDetail;
 }): TokenFlowNode {
   const metrics = getNodeMetrics(token);
   const resolvedContextAfter = contextAfter ?? cumulativeDecodedText ?? textPreview;
@@ -827,6 +917,7 @@ function buildTokenNode({
       requestDemoMode: demoMode,
       responseMode,
       sourceNotes: reasoning.notes,
+      providerCapabilities,
       reasoningIntent: reasoning.intent,
       reasoningStrategy: reasoning.strategy,
       reasoningFocusTerms: reasoning.focusTerms,
@@ -932,6 +1023,7 @@ function buildFlowNodeFromRecord(
     reasoning,
     branchRationale: record.branchRationale,
     metadata: record.metadata,
+    providerCapabilities: record.providerCapabilities,
     rawLogits: null,
     topAlternatives: record.sourceAlternatives.map(mapGraphAlternativeToInspector),
     sourceAlternatives: record.sourceAlternatives.map(mapGraphAlternativeToInspector),
@@ -1330,6 +1422,17 @@ function buildNodeProbabilityView(
   >();
 
   for (const group of groups.values()) {
+    if (!group[0]?.data.providerCapabilities.supports_logprobs) {
+      group.forEach((node) => {
+        views.set(node.id, {
+          displayProbability: 0,
+          probabilityCoverage: 0,
+          remainingProbabilityMass: 0,
+        });
+      });
+      continue;
+    }
+
     const fallbackProbabilityView = buildProbabilityPresentation(
       group.map((groupNode) => ({
         probability: groupNode.data.probability,
@@ -1372,6 +1475,10 @@ function buildNodeProbabilityView(
 function getMiniMapColor(node: TokenFlowNode) {
   if (node.data.kind === "prompt" || node.data.isMainPath) {
     return "#38bdf8";
+  }
+
+  if (!node.data.providerCapabilities.supports_logprobs) {
+    return "#64748b";
   }
 
   if (node.data.isSearchFocused) {
@@ -1564,6 +1671,14 @@ function buildInspectorAlternatives(
     };
   }
 
+  if (!node.providerCapabilities.supports_branching) {
+    return {
+      coverage: 0,
+      items: [] as DecoratedInspectorAlternative[],
+      remainingProbabilityMass: 0,
+    };
+  }
+
   const alternatives = [
     {
       branchId: node.branchId,
@@ -1639,6 +1754,10 @@ function buildNaturalLanguageReason(
     return "The prompt is the root context. Expanding it requests the next-token distribution from that point.";
   }
 
+  if (!node.data.providerCapabilities.supports_logprobs) {
+    return `This provider does not expose token-level probabilities for "${node.data.displayTokenText}".`;
+  }
+
   const chosenContinuation =
     inspectorAlternatives.find((alternative) => alternative.isChosen) ?? null;
 
@@ -1661,7 +1780,9 @@ function buildNaturalLanguageReason(
 }
 
 function getBranchSummaries(nodes: TokenFlowNode[], edges: ProbabilityFlowEdge[]) {
-  const tokenNodes = nodes.filter((node) => node.data.kind === "token");
+  const tokenNodes = nodes.filter(
+    (node) => node.data.kind === "token" && node.data.providerCapabilities.supports_logprobs,
+  );
 
   if (tokenNodes.length === 0) {
     return {
@@ -1838,6 +1959,9 @@ function Workspace() {
   const [modelCatalog, setModelCatalog] = useState<ModelCatalogResponse>(
     FALLBACK_MODEL_CATALOG,
   );
+  const [selectedProvider, setSelectedProvider] = useState<ProviderId>(
+    FALLBACK_MODEL_CATALOG.default_provider as ProviderId,
+  );
   const [model, setModel] = useState(FALLBACK_MODEL_CATALOG.default_model);
   const [preset, setPreset] = useState(FALLBACK_MODEL_CATALOG.default_preset);
   const [generation, setGeneration] = useState<GenerationResponse | null>(null);
@@ -1906,7 +2030,29 @@ function Workspace() {
   });
 
   const models = modelCatalog.models;
+  const providers = modelCatalog.providers;
   const presets = modelCatalog.presets;
+  const selectedProviderOption = findProviderOption(providers, selectedProvider);
+  const filteredModels = useMemo(
+    () => getModelsForProvider(models, selectedProvider),
+    [models, selectedProvider],
+  );
+  const selectedModelOption = findModelOption(models, model);
+  const selectedCapabilities =
+    filteredModels.find((option) => option.id === model)?.capabilities ??
+    selectedProviderOption.capabilities ??
+    selectedModelOption.capabilities;
+  const generationProviderId =
+    generation?.request.provider ??
+    (generation ? findModelOption(models, generation.request.model).provider : null);
+  const activeCapabilities =
+    generation && generationProviderId === selectedProvider
+      ? generation.provider_capabilities
+      : selectedCapabilities;
+  const selectedProviderStatusMessage = selectedProviderOption.status_message ?? null;
+  const selectedProviderRecommendations = selectedProviderOption.recommended_models ?? [];
+  const selectedProviderReady = selectedProviderOption.status === "ready";
+  const canGenerate = demoMode || (selectedProviderReady && filteredModels.length > 0);
   const activePathIds = useMemo(
     () => buildActivePathIds(branchChoices, graphNodes),
     [branchChoices, graphNodes],
@@ -2045,6 +2191,14 @@ function Workspace() {
     [activeLeafNodeId, probabilityViewMode, selectedNode?.id, tokenGraph],
   );
   const inspectorAlternatives = inspectorAlternativeView.items;
+  const selectedProviderIdForInspector =
+    readMetadataString(selectedNode?.data.metadata ?? null, "provider") ??
+    generation?.request.provider ??
+    selectedProvider;
+  const selectedProviderLabelForInspector = findProviderOption(
+    providers,
+    selectedProviderIdForInspector,
+  ).label;
   const generatedModelOption = findModelOption(models, generation?.request.model ?? model);
   const generatedPresetOption = findPresetOption(presets, generation?.request.preset ?? preset);
   const activeSentenceNodes = activePathIds
@@ -2088,6 +2242,7 @@ function Workspace() {
         rawProbability: node.data.rawProbability,
         rawToken: node.data.tokenText,
         step: node.data.generationStep,
+        supportsLogprobs: node.data.providerCapabilities.supports_logprobs,
       })),
     [activeSentenceNodes, changedTokenIndexSet],
   );
@@ -2095,14 +2250,22 @@ function Workspace() {
     () => ({
       branchDepth: activeSentenceNodes[activeSentenceNodes.length - 1]?.data.depth ?? 0,
       displayProbability:
-        activeSentenceNodes[activeSentenceNodes.length - 1]?.data.displayProbability ?? 0,
-      entropy: activeSentenceNodes[activeSentenceNodes.length - 1]?.data.entropy ?? 0,
+        activeCapabilities.supports_logprobs
+          ? (activeSentenceNodes[activeSentenceNodes.length - 1]?.data.displayProbability ?? 0)
+          : null,
+      entropy: activeCapabilities.supports_entropy
+        ? (activeSentenceNodes[activeSentenceNodes.length - 1]?.data.entropy ?? 0)
+        : null,
       latency: activeSentenceNodes[activeSentenceNodes.length - 1]?.data.latency ?? 0,
       rawProbability:
-        activeSentenceNodes[activeSentenceNodes.length - 1]?.data.rawProbability ?? 0,
+        activeCapabilities.supports_logprobs
+          ? (activeSentenceNodes[activeSentenceNodes.length - 1]?.data.rawProbability ?? 0)
+          : null,
+      supportsEntropy: activeCapabilities.supports_entropy,
+      supportsLogprobs: activeCapabilities.supports_logprobs,
       tokenCount: activeSentenceNodes.length,
     }),
-    [activeSentenceNodes],
+    [activeCapabilities.supports_entropy, activeCapabilities.supports_logprobs, activeSentenceNodes],
   );
   const currentRealityContinuationMode = useMemo(
     () =>
@@ -2188,6 +2351,16 @@ function Workspace() {
   }, [selectedNodeId]);
 
   useEffect(() => {
+    const nextModel = findCompatibleModelId(models, selectedProvider, model);
+
+    if (!nextModel || nextModel === model) {
+      return;
+    }
+
+    setModel(nextModel);
+  }, [model, models, selectedProvider]);
+
+  useEffect(() => {
     document.documentElement.dataset.surfaceTheme = surfaceTheme;
   }, [surfaceTheme]);
 
@@ -2265,6 +2438,43 @@ function Workspace() {
     return () => window.removeEventListener("keydown", listener);
   }, []);
 
+  async function loadModelCatalog(forceRefresh = false) {
+    setIsLoadingModels(true);
+
+    try {
+      const response = await fetch(forceRefresh ? "/api/models?refresh=1" : "/api/models", {
+        cache: "no-store",
+      });
+
+      if (!response.ok) {
+        await throwApiError(response);
+      }
+
+      const payload = (await response.json()) as ModelCatalogResponse;
+      setModelCatalog(payload);
+      setSelectedProvider((currentProvider) =>
+        payload.providers.some((item) => item.id === currentProvider)
+          ? (currentProvider as ProviderId)
+          : (payload.default_provider as ProviderId),
+      );
+      setModel((currentModel) =>
+        payload.models.some((item) => item.id === currentModel)
+          ? currentModel
+          : payload.default_model,
+      );
+      setPreset((currentPreset) =>
+        payload.presets.some((item) => item.id === currentPreset)
+          ? currentPreset
+          : payload.default_preset,
+      );
+    } catch {
+      setModelCatalog(FALLBACK_MODEL_CATALOG);
+      setSelectedProvider(FALLBACK_MODEL_CATALOG.default_provider as ProviderId);
+    } finally {
+      setIsLoadingModels(false);
+    }
+  }
+
   async function refreshHealth() {
     setIsCheckingHealth(true);
 
@@ -2284,6 +2494,8 @@ function Workspace() {
     } finally {
       setIsCheckingHealth(false);
     }
+
+    await loadModelCatalog(true);
   }
 
   useEffect(() => {
@@ -2312,42 +2524,8 @@ function Workspace() {
         }
       }
 
-      setIsLoadingModels(true);
-
-      try {
-        const response = await fetch("/api/models", {
-          cache: "no-store",
-        });
-
-        if (!response.ok) {
-          await throwApiError(response);
-        }
-
-        const payload = (await response.json()) as ModelCatalogResponse;
-
-        if (!isActive) {
-          return;
-        }
-
-        setModelCatalog(payload);
-        setModel((currentModel) =>
-          payload.models.some((item) => item.id === currentModel)
-            ? currentModel
-            : payload.default_model,
-        );
-        setPreset((currentPreset) =>
-          payload.presets.some((item) => item.id === currentPreset)
-            ? currentPreset
-            : payload.default_preset,
-        );
-      } catch {
-        if (isActive) {
-          setModelCatalog(FALLBACK_MODEL_CATALOG);
-        }
-      } finally {
-        if (isActive) {
-          setIsLoadingModels(false);
-        }
+      if (isActive) {
+        await loadModelCatalog(false);
       }
     })();
 
@@ -2355,6 +2533,21 @@ function Workspace() {
       isActive = false;
     };
   }, []);
+
+  const handleProviderChange = useCallback(
+    (nextProvider: ProviderId) => {
+      setErrorMessage(null);
+      setSelectedProvider((currentProvider) =>
+        currentProvider === nextProvider ? currentProvider : nextProvider,
+      );
+      setModel((currentModel) => {
+        const nextModel = findCompatibleModelId(models, nextProvider, currentModel);
+
+        return nextModel && nextModel !== currentModel ? nextModel : currentModel;
+      });
+    },
+    [models],
+  );
 
   function getCurrentSnapshot(): GraphSnapshot {
     return {
@@ -2658,6 +2851,7 @@ function Workspace() {
       topP: payload.request.top_p,
       variation: payload.request.variation,
       demoMode: payload.request.demo_mode,
+      providerCapabilities: payload.provider_capabilities,
     });
     const rootRecord =
       nextTokenGraph.rootNodeId ? nextTokenGraph.nodesById[nextTokenGraph.rootNodeId] ?? null : null;
@@ -2698,20 +2892,21 @@ function Workspace() {
         cumulativeDecodedText:
           trace.cumulative_decoded_text ?? trace.context_after ?? trace.text_preview,
         cumulativeTokenIds: trace.cumulative_token_ids ?? null,
-        cumulativeLogProbability: trace.cumulative_log_probability ?? trace.log_probability,
+        cumulativeLogProbability: trace.cumulative_log_probability ?? trace.log_probability ?? undefined,
         contextBefore: trace.context_before,
         contextAfter: trace.context_after,
         generationStep: trace.generation_step ?? trace.position,
-        probability: trace.probability,
-        rawProbability: trace.raw_probability,
-        normalizedDisplayedProbability: trace.normalized_displayed_probability,
-        logProbability: trace.log_probability,
-        entropy: trace.entropy,
-        cumulativeProbability: trace.cumulative_probability,
+        probability: trace.probability ?? 0,
+        rawProbability: trace.raw_probability ?? 0,
+        normalizedDisplayedProbability: trace.normalized_displayed_probability ?? 0,
+        logProbability: trace.log_probability ?? 0,
+        entropy: trace.entropy ?? 0,
+        cumulativeProbability: trace.cumulative_probability ?? 0,
         latency: trace.latency_ms,
         depth: trace.position + 1,
         rank: 1,
         parentId,
+        providerCapabilities: payload.provider_capabilities,
         position: parentNode
           ? { x: parentNode.position.x + HORIZONTAL_GAP, y: parentNode.position.y }
           : { x: 0, y: 0 },
@@ -2742,7 +2937,10 @@ function Workspace() {
         [...nodesRef.current, syncedNextNode],
         nextTokenGraph,
       );
-      const nextEdges = [...edgesRef.current, buildEdge(parentId, syncedNextNode.id, trace.probability, true)];
+      const nextEdges = [
+        ...edgesRef.current,
+        buildEdge(parentId, syncedNextNode.id, trace.probability ?? trace.raw_probability ?? 0, true),
+      ];
       applyTransition(
         {
           nodes: nextNodes,
@@ -2821,6 +3019,10 @@ function Workspace() {
     });
     setTokenGraph(nextTokenGraph);
     tokenGraphRef.current = nextTokenGraph;
+    const payloadProviderCapabilities =
+      "provider_capabilities" in payload
+        ? payload.provider_capabilities
+        : parentNode.data.providerCapabilities;
 
     const reasoning: ReasoningBundle = {
       notes: payload.notes || parentNode.data.sourceNotes,
@@ -2921,6 +3123,7 @@ function Workspace() {
             depth: candidate.depth,
             rank: candidate.rank,
             parentId: nodeId,
+            providerCapabilities: payloadProviderCapabilities,
             position: {
               x: parentNode.position.x + HORIZONTAL_GAP,
               y: parentNode.position.y,
@@ -3100,6 +3303,7 @@ function Workspace() {
         },
         body: JSON.stringify({
           root_prompt: validation.rootPrompt,
+          provider: node.data.metadata.provider ?? generation?.request.provider ?? selectedProvider,
           model: node.data.requestModel,
           preset: node.data.requestPreset,
           temperature: node.data.requestTemperature,
@@ -3213,6 +3417,11 @@ function Workspace() {
       return false;
     }
 
+    if (!node.data.providerCapabilities.supports_branching) {
+      setErrorMessage("This provider does not expose token-level alternatives for branching.");
+      return false;
+    }
+
     if (node.data.kind === "token" && node.data.topAlternatives.length > 0) {
       return expandStoredAlternatives(nodeId, options);
     }
@@ -3229,6 +3438,11 @@ function Workspace() {
     const node = nodesRef.current.find((currentNode) => currentNode.id === nodeId);
 
     if (!node || node.data.status === "loading") {
+      return false;
+    }
+
+    if (!node.data.providerCapabilities.supports_continuation) {
+      setErrorMessage("This provider does not support graph continuation from the selected node.");
       return false;
     }
 
@@ -3258,6 +3472,7 @@ function Workspace() {
         },
         body: JSON.stringify({
           root_prompt: validation.rootPrompt,
+          provider: node.data.metadata.provider ?? generation?.request.provider ?? selectedProvider,
           model: node.data.requestModel,
           preset: node.data.requestPreset,
           temperature: node.data.requestTemperature,
@@ -3510,6 +3725,7 @@ function Workspace() {
       topP,
       variation: nextVariation,
       demoMode,
+      providerCapabilities: selectedCapabilities,
     });
 
     setGraphNodes([loadingRoot]);
@@ -3542,6 +3758,7 @@ function Workspace() {
         },
         body: JSON.stringify({
           prompt: promptValue,
+          provider: selectedProvider,
           model,
           preset,
           temperature,
@@ -3587,6 +3804,7 @@ function Workspace() {
       (node) =>
         !node.hidden &&
         node.id !== "root" &&
+        node.data.providerCapabilities.supports_branching &&
         (node.data.topAlternatives.length > 0
           ? !node.data.alternativesExpanded
           : !node.data.distributionRequested),
@@ -3792,6 +4010,9 @@ function Workspace() {
   const handleNodeDoubleClick = useCallback<NodeMouseHandler<TokenFlowNode>>((event, node) => {
     event.preventDefault();
     setContextMenu(null);
+    if (!node.data.providerCapabilities.supports_branching) {
+      return;
+    }
     void expandNodeRef.current(node.id, { pushHistory: true });
   }, []);
 
@@ -3904,6 +4125,8 @@ function Workspace() {
       ? getGenerationLineage(tokenGraph, continuationPreviewNode.generationId)
       : [];
   const backgroundOpacity = Math.max(0.035, 0.16 - Math.max(viewport.zoom - 0.8, 0) * 0.06);
+  const contextMenuNode =
+    contextMenu ? displayNodes.find((node) => node.id === contextMenu.nodeId) ?? null : null;
   const contextMenuActions = contextMenu
     ? [
         {
@@ -3922,6 +4145,7 @@ function Workspace() {
         },
         {
           label: "Continue generation",
+          disabled: !contextMenuNode?.data.providerCapabilities.supports_continuation,
           onSelect: () => {
             openContinuationPreview(contextMenu.nodeId, 1);
             setContextMenu(null);
@@ -3929,6 +4153,7 @@ function Workspace() {
         },
         {
           label: "Generate deeper",
+          disabled: !contextMenuNode?.data.providerCapabilities.supports_continuation,
           onSelect: () => {
             openContinuationPreview(contextMenu.nodeId, 4);
             setContextMenu(null);
@@ -3957,6 +4182,7 @@ function Workspace() {
         },
         {
           label: "Expand futures",
+          disabled: !contextMenuNode?.data.providerCapabilities.supports_branching,
           onSelect: () => {
             void expandTokenOccurrence(contextMenu.nodeId, { pushHistory: true });
             setContextMenu(null);
@@ -3968,7 +4194,7 @@ function Workspace() {
             collapseSubtree(contextMenu.nodeId);
             setContextMenu(null);
           },
-          disabled: !displayNodes.find((node) => node.id === contextMenu.nodeId)?.data.childCount,
+          disabled: !contextMenuNode?.data.childCount,
         },
         {
           label: "Delete branch",
@@ -4143,7 +4369,12 @@ function Workspace() {
           <button className="tool-button" onClick={handleResetView} type="button">
             Center
           </button>
-          <button className="tool-button" onClick={() => void handleExpandAll()} type="button">
+          <button
+            className="tool-button"
+            disabled={!activeCapabilities.supports_branching}
+            onClick={() => void handleExpandAll()}
+            type="button"
+          >
             Expand all
           </button>
           <button className="tool-button" onClick={handleCollapseAll} type="button">
@@ -4174,29 +4405,38 @@ function Workspace() {
           <details className="tool-popover">
             <summary className="tool-button">Settings</summary>
             <div className="tool-popover__panel">
-              <div className="tool-popover__section">
-                <p className="tool-popover__label">Probability display</p>
-                <button
-                  className={`tool-popover__option${
-                    probabilityViewMode === "normalized" ? " tool-popover__option--active" : ""
-                  }`}
-                  onClick={() => setProbabilityViewMode("normalized")}
-                  type="button"
-                >
-                  <span>Normalized</span>
-                  <small>Displayed siblings always sum to 100%.</small>
-                </button>
-                <button
-                  className={`tool-popover__option${
-                    probabilityViewMode === "raw" ? " tool-popover__option--active" : ""
-                  }`}
-                  onClick={() => setProbabilityViewMode("raw")}
-                  type="button"
-                >
-                  <span>Raw</span>
-                  <small>Show true model mass and the remaining probability.</small>
-                </button>
-              </div>
+              {activeCapabilities.supports_logprobs ? (
+                <div className="tool-popover__section">
+                  <p className="tool-popover__label">Probability display</p>
+                  <button
+                    className={`tool-popover__option${
+                      probabilityViewMode === "normalized" ? " tool-popover__option--active" : ""
+                    }`}
+                    onClick={() => setProbabilityViewMode("normalized")}
+                    type="button"
+                  >
+                    <span>Normalized</span>
+                    <small>Displayed siblings always sum to 100%.</small>
+                  </button>
+                  <button
+                    className={`tool-popover__option${
+                      probabilityViewMode === "raw" ? " tool-popover__option--active" : ""
+                    }`}
+                    onClick={() => setProbabilityViewMode("raw")}
+                    type="button"
+                  >
+                    <span>Raw</span>
+                    <small>Show true model mass and the remaining probability.</small>
+                  </button>
+                </div>
+              ) : (
+                <div className="tool-popover__section">
+                  <p className="tool-popover__label">Provider capabilities</p>
+                  <p className="inspector-empty">
+                    This provider does not expose token-level probabilities.
+                  </p>
+                </div>
+              )}
             </div>
           </details>
           <button
@@ -4241,6 +4481,8 @@ function Workspace() {
             : null
         }
         stats={currentRealityStats}
+        supportsEntropy={activeCapabilities.supports_entropy}
+        supportsLogprobs={activeCapabilities.supports_logprobs}
         summary={
           selectedNode?.data.kind === "prompt"
             ? "Expand the prompt to see the first decision."
@@ -4332,18 +4574,35 @@ function Workspace() {
               value={prompt}
             />
 
+            <select
+              aria-label="Provider"
+              className="explorer-input"
+              disabled={isLoadingModels}
+              onChange={(event) => {
+                handleProviderChange(event.target.value as ProviderId);
+              }}
+              value={selectedProvider}
+            >
+              {providers.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+
             <div className="explorer-grid">
               <select
                 aria-label="Model"
                 className="explorer-input"
-                disabled={isLoadingModels}
+                disabled={isLoadingModels || filteredModels.length === 0}
                 onChange={(event) => {
                   setModel(event.target.value);
                   setErrorMessage(null);
                 }}
-                value={model}
+                value={filteredModels.some((option) => option.id === model) ? model : ""}
               >
-                {models.map((option) => (
+                {filteredModels.length === 0 ? <option value="">No models available</option> : null}
+                {filteredModels.map((option) => (
                   <option key={option.id} value={option.id}>
                     {option.label}
                   </option>
@@ -4363,10 +4622,19 @@ function Workspace() {
                 {presets.map((option) => (
                   <option key={option.id} value={option.id}>
                     {option.label}
-                  </option>
-                ))}
-              </select>
-            </div>
+                </option>
+              ))}
+            </select>
+          </div>
+
+            {selectedProviderStatusMessage ? (
+              <div className="explorer-note">
+                <p>{selectedProviderStatusMessage}</p>
+                {selectedProviderRecommendations.length > 0 ? (
+                  <p>{`Recommended models: ${selectedProviderRecommendations.join(", ")}`}</p>
+                ) : null}
+              </div>
+            ) : null}
 
             <div className="explorer-grid explorer-grid--compact">
               <input
@@ -4405,7 +4673,7 @@ function Workspace() {
 
               <button
                 className="explorer-button explorer-button--primary"
-                disabled={isGenerating || isLoadingModels}
+                disabled={isGenerating || isLoadingModels || !canGenerate}
                 onClick={() => void handleSubmit()}
                 type="button"
               >
@@ -4429,6 +4697,7 @@ function Workspace() {
             </div>
 
             <div className="explorer-chip-row">
+              <span className="explorer-chip">{selectedProviderOption.label}</span>
               <span className="explorer-chip">{generatedModelOption.label}</span>
               <span className="explorer-chip">{generatedPresetOption.label}</span>
               {generation?.request.demo_mode ? (
@@ -4469,11 +4738,19 @@ function Workspace() {
                 </div>
                 <div>
                   <dt>Probability</dt>
-                  <dd>{formatPercent(selectedNode.data.displayProbability)}</dd>
+                  <dd>
+                    {selectedNode.data.providerCapabilities.supports_logprobs
+                      ? formatPercent(selectedNode.data.displayProbability)
+                      : "Unavailable"}
+                  </dd>
                 </div>
                 <div>
                   <dt>Mode</dt>
-                  <dd>{getProbabilityModeLabel(probabilityViewMode)}</dd>
+                  <dd>
+                    {selectedNode.data.providerCapabilities.supports_logprobs
+                      ? getProbabilityModeLabel(probabilityViewMode)
+                      : "Unavailable"}
+                  </dd>
                 </div>
                 <div>
                   <dt>Continuation</dt>
@@ -4492,7 +4769,11 @@ function Workspace() {
                 </div>
                 <div>
                   <dt>Entropy</dt>
-                  <dd>{formatNumber(selectedRecord.entropy)}</dd>
+                  <dd>
+                    {selectedNode.data.providerCapabilities.supports_entropy
+                      ? formatNumber(selectedRecord.entropy)
+                      : "Unavailable"}
+                  </dd>
                 </div>
                 <div>
                   <dt>Latency</dt>
@@ -4500,7 +4781,21 @@ function Workspace() {
                 </div>
                 <div>
                   <dt>Top-K coverage</dt>
-                  <dd>{inspectorAlternatives.length > 0 ? formatPercent(inspectorCoverage) : "-"}</dd>
+                  <dd>
+                    {selectedNode.data.providerCapabilities.supports_branching
+                      ? inspectorAlternatives.length > 0
+                        ? formatPercent(inspectorCoverage)
+                        : "-"
+                      : "Unavailable"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Provider</dt>
+                  <dd>{selectedProviderLabelForInspector}</dd>
+                </div>
+                <div>
+                  <dt>Model</dt>
+                  <dd>{selectedNode.data.requestModel}</dd>
                 </div>
               </div>
             </div>
@@ -4527,10 +4822,13 @@ function Workspace() {
               <div className="inspector-section__heading">
                 <p className="inspector-section__label">Top alternatives</p>
                 <div className="inspector-section__meta">
-                  <span className="inspector-inline-badge">
-                    {getProbabilityModeLabel(probabilityViewMode)}
-                  </span>
-                  {probabilityViewMode === "raw" ? (
+                  {selectedNode.data.providerCapabilities.supports_logprobs ? (
+                    <span className="inspector-inline-badge">
+                      {getProbabilityModeLabel(probabilityViewMode)}
+                    </span>
+                  ) : null}
+                  {selectedNode.data.providerCapabilities.supports_logprobs &&
+                  probabilityViewMode === "raw" ? (
                     <span className="inspector-inline-badge">
                       Other tokens {formatPercent(inspectorRemainingProbabilityMass)}
                     </span>
@@ -4557,6 +4855,10 @@ function Workspace() {
                       </span>
                     </button>
                   ))}
+                </div>
+              ) : !selectedNode.data.providerCapabilities.supports_branching ? (
+                <div className="inspector-empty">
+                  This provider does not expose token-level alternatives.
                 </div>
               ) : selectedNode.data.distributionMessage ? (
                 <div className="inspector-empty">No alternatives were returned for this token.</div>
@@ -4587,19 +4889,35 @@ function Workspace() {
                   </div>
                   <div>
                     <dt>Raw probability</dt>
-                    <dd>{formatProbability(selectedRecord.rawProbability)}</dd>
+                    <dd>
+                      {selectedNode.data.providerCapabilities.supports_logprobs
+                        ? formatProbability(selectedRecord.rawProbability)
+                        : "Unavailable"}
+                    </dd>
                   </div>
                   <div>
                     <dt>Log probability</dt>
-                    <dd>{formatNumber(selectedRecord.logProbability)}</dd>
+                    <dd>
+                      {selectedNode.data.providerCapabilities.supports_logprobs
+                        ? formatNumber(selectedRecord.logProbability)
+                        : "Unavailable"}
+                    </dd>
                   </div>
                   <div>
                     <dt>Cumulative probability</dt>
-                    <dd>{formatProbability(selectedRecord.cumulativeProbability)}</dd>
+                    <dd>
+                      {selectedNode.data.providerCapabilities.supports_logprobs
+                        ? formatProbability(selectedRecord.cumulativeProbability)
+                        : "Unavailable"}
+                    </dd>
                   </div>
                   <div>
                     <dt>Cumulative logprob</dt>
-                    <dd>{formatNumber(selectedRecord.cumulativeLogProbability)}</dd>
+                    <dd>
+                      {selectedNode.data.providerCapabilities.supports_logprobs
+                        ? formatNumber(selectedRecord.cumulativeLogProbability)
+                        : "Unavailable"}
+                    </dd>
                   </div>
                   <div>
                     <dt>Branch depth</dt>
@@ -4700,16 +5018,11 @@ function Workspace() {
       <ReactFlow<TokenFlowNode, ProbabilityFlowEdge>
         className={isGraphInteracting ? "llmscope-flow llmscope-flow--interacting" : "llmscope-flow"}
         colorMode="dark"
-        defaultEdgeOptions={{
-          animated: true,
-          type: "probabilityEdge",
-        }}
+        defaultEdgeOptions={DEFAULT_EDGE_OPTIONS}
         edgeTypes={edgeTypes}
         edges={displayEdges}
         fitView
-        fitViewOptions={{
-          padding: 0.18,
-        }}
+        fitViewOptions={FIT_VIEW_OPTIONS}
         maxZoom={1.9}
         minZoom={0.16}
         nodeClickDistance={8}

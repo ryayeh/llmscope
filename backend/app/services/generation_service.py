@@ -6,7 +6,9 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import perf_counter
+from types import SimpleNamespace
 from typing import Any, Callable
+from urllib import error
 import zlib
 
 from openai import OpenAI
@@ -14,6 +16,8 @@ from openai import OpenAI
 from app.core.config import get_settings
 from app.core.errors import LLMScopeError
 from app.models.provider import ModelProvider
+from app.providers.base import ProviderCapabilities
+from app.providers.ollama_provider import OllamaProvider
 from app.schemas.generation import (
     AlternativeCandidate,
     ContinuationMode,
@@ -25,14 +29,19 @@ from app.schemas.generation import (
     NodeExpansionCandidate,
     NodeExpansionRequest,
     NodeExpansionResponse,
-    ProviderCapabilitiesDetail,
     PromptInsights,
     RequestEcho,
     TokenTrace,
     TokenTreeNode,
     TreeSummary,
 )
-from app.schemas.model_catalog import ModelCatalogResponse, ModelOption, PresetOption
+from app.schemas.model_catalog import (
+    ModelCatalogResponse,
+    ModelOption,
+    PresetOption,
+    ProviderOption,
+)
+from app.schemas.provider_capabilities import ProviderCapabilitiesDetail
 
 logger = logging.getLogger(__name__)
 
@@ -125,30 +134,67 @@ RESPONSE_STYLE_HINTS = [
     "Prefer a crisp benchmark-first answer when the user is asking for a range or recommendation.",
 ]
 
-MODEL_OPTIONS = [
+OPENAI_PROVIDER_CAPABILITIES = ProviderCapabilities(
+    supports_token_logprobs=True,
+    supports_native_continuation=False,
+    minimum_output_tokens=16,
+    supports_entropy=True,
+    supports_attention=False,
+    supports_streaming=False,
+    supports_branching=True,
+    supports_continuation=True,
+)
+
+OLLAMA_PROVIDER_CAPABILITIES_DETAIL = ProviderCapabilitiesDetail(
+    supports_logprobs=False,
+    supports_entropy=False,
+    supports_attention=False,
+    supports_exact_continuation=False,
+    supports_streaming=True,
+    supports_branching=False,
+    supports_continuation=False,
+    minimum_output_tokens=1,
+)
+
+OPENAI_PROVIDER_CAPABILITIES_DETAIL = ProviderCapabilitiesDetail(
+    supports_logprobs=True,
+    supports_entropy=True,
+    supports_attention=False,
+    supports_exact_continuation=False,
+    supports_streaming=False,
+    supports_branching=True,
+    supports_continuation=True,
+    minimum_output_tokens=16,
+)
+
+OPENAI_MODEL_OPTIONS = [
     ModelOption(
         id="gpt-4o-mini",
         label="GPT-4o mini",
         provider=ModelProvider.OPENAI,
         group="OpenAI",
+        capabilities=OPENAI_PROVIDER_CAPABILITIES_DETAIL,
     ),
     ModelOption(
         id="gpt-4.1-mini",
         label="GPT-4.1 mini",
         provider=ModelProvider.OPENAI,
         group="OpenAI",
+        capabilities=OPENAI_PROVIDER_CAPABILITIES_DETAIL,
     ),
     ModelOption(
         id="gpt-4o",
         label="GPT-4o",
         provider=ModelProvider.OPENAI,
         group="OpenAI",
+        capabilities=OPENAI_PROVIDER_CAPABILITIES_DETAIL,
     ),
     ModelOption(
         id="gpt-4.1",
         label="GPT-4.1",
         provider=ModelProvider.OPENAI,
         group="OpenAI",
+        capabilities=OPENAI_PROVIDER_CAPABILITIES_DETAIL,
     ),
 ]
 
@@ -159,7 +205,7 @@ MODEL_PRICING_USD_PER_1K = {
     "gpt-4.1": {"input": 0.002, "output": 0.008},
 }
 
-MODEL_OPTION_MAP = {option.id: option for option in MODEL_OPTIONS}
+OPENAI_MODEL_OPTION_MAP = {option.id: option for option in OPENAI_MODEL_OPTIONS}
 PRESET_OPTION_MAP = {option.id: option for option in PRESET_OPTIONS}
 
 
@@ -171,13 +217,6 @@ class ContinuationContext:
     character_length: int
     utf8_length: int
     token_count: int
-
-
-@dataclass(frozen=True)
-class ProviderCapabilities:
-    supports_native_continuation: bool
-    supports_token_logprobs: bool
-    minimum_output_tokens: int
 
 
 @dataclass
@@ -387,29 +426,28 @@ class GenerationService:
     def __init__(self) -> None:
         self._settings = get_settings()
         self._client: OpenAI | None = None
+        self._ollama_provider = OllamaProvider(self._settings.ollama_base_url)
         self._segments_by_id: dict[str, ContinuationSegment] = {}
+        try:
+            self._ollama_provider.warm_cache()
+        except Exception:  # pragma: no cover - defensive startup guard.
+            logger.debug("Unable to warm the Ollama model cache at startup.", exc_info=True)
 
-    def list_models(self) -> ModelCatalogResponse:
-        return ModelCatalogResponse(
-            default_model="gpt-4.1-mini",
-            default_preset="general",
-            models=MODEL_OPTIONS,
-            presets=PRESET_OPTIONS,
-        )
+    def list_models(self, *, force_refresh: bool = False) -> ModelCatalogResponse:
+        return self._build_model_catalog(force_refresh=force_refresh)
 
     def build_response(self, request: GenerationRequest) -> GenerationResponse:
         prompt = request.prompt
         keywords = self._extract_keywords(prompt)
         intent, strategy = self._detect_intent(prompt.lower())
         preset = request.preset if request.preset in PRESET_OPTION_MAP else "general"
-        model_option = MODEL_OPTION_MAP.get(
+        model_option = self._resolve_model_option(
+            model=request.model,
+            requested_provider=request.provider,
+        )
+        capabilities = self._provider_capabilities_for_model(
             request.model,
-            ModelOption(
-                id=request.model,
-                label=request.model,
-                provider=ModelProvider.OPENAI,
-                group="Custom",
-            ),
+            request.provider,
         )
 
         if request.demo_mode:
@@ -420,6 +458,11 @@ class GenerationService:
                 intent=intent,
                 preset=preset,
             )
+        elif model_option.provider == ModelProvider.OLLAMA:
+            completion, response_mode, usage, latency_ms, tokens = self._build_ollama_generation(
+                request=request,
+                prompt=prompt,
+            )
         else:
             completion, response_mode, usage, latency_ms, tokens = self._build_live_generation(
                 request=request,
@@ -428,9 +471,14 @@ class GenerationService:
                 preset=preset,
             )
 
+        initial_continuation_mode = (
+            ContinuationMode.APPROXIMATE
+            if model_option.provider == ModelProvider.OLLAMA
+            else ContinuationMode.EXACT
+        )
         tokens = self._apply_trace_continuation_metadata(
             traces=tokens,
-            continuation_mode=ContinuationMode.EXACT,
+            continuation_mode=initial_continuation_mode,
             segment_id=self._make_segment_id(
                 source_node_id="root",
                 assistant_prefix="",
@@ -450,10 +498,14 @@ class GenerationService:
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
             latency_ms=effective_latency_ms,
-            estimated_cost_usd=self._estimate_cost(
-                request.model,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
+            estimated_cost_usd=(
+                0.0
+                if model_option.provider != ModelProvider.OPENAI
+                else self._estimate_cost(
+                    request.model,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                )
             ),
             generated_at=datetime.now(timezone.utc),
         )
@@ -468,7 +520,11 @@ class GenerationService:
         notes = (
             "Demo data. Token alternatives are synthetic because Demo Mode is enabled."
             if request.demo_mode
-            else "Live provider response with per-token logprobs."
+            else (
+                "Local Ollama generation. Probabilities and entropy are unavailable because Ollama does not expose token logprobs."
+                if model_option.provider == ModelProvider.OLLAMA
+                else "Live provider response with per-token logprobs."
+            )
         )
 
         return GenerationResponse(
@@ -478,6 +534,7 @@ class GenerationService:
             notes=notes,
             request=RequestEcho(
                 prompt=prompt,
+                provider=model_option.provider,
                 model=request.model,
                 preset=preset,
                 max_tokens=request.max_tokens,
@@ -491,15 +548,17 @@ class GenerationService:
             tree=tree,
             tree_summary=tree_summary,
             stats=stats,
+            provider_capabilities=self._serialize_provider_capabilities(capabilities),
         )
 
     def expand_node(self, request: NodeExpansionRequest) -> NodeExpansionResponse:
+        self._ensure_branching_supported(request.model, request.provider)
         context = self._build_continuation_context(request)
         prompt = context.root_prompt
         preset = request.preset if request.preset in PRESET_OPTION_MAP else "general"
         assistant_prefix = context.assistant_prefix
         intent, _ = self._detect_intent(prompt.lower())
-        capabilities = self._provider_capabilities_for_model(request.model)
+        capabilities = self._provider_capabilities_for_model(request.model, request.provider)
 
         if self._settings.app_env.lower() == "development":
             logger.debug(
@@ -598,8 +657,9 @@ class GenerationService:
         )
 
     def continue_node(self, request: ContinueGenerationRequest) -> ContinueGenerationResponse:
+        self._ensure_continuation_supported(request.model, request.provider)
         context = self._build_continuation_context(request)
-        capabilities = self._provider_capabilities_for_model(request.model)
+        capabilities = self._provider_capabilities_for_model(request.model, request.provider)
         cached_segment = (
             self._segments_by_id.get(request.cached_segment_id)
             if request.cached_segment_id
@@ -657,32 +717,166 @@ class GenerationService:
         completion = "".join(step.token for step in steps)
         return completion, "live", usage, latency_ms, steps
 
-    def _provider_capabilities_for_model(self, model: str) -> ProviderCapabilities:
-        provider = self._provider_for_model(model)
+    def _build_ollama_generation(
+        self,
+        *,
+        request: GenerationRequest,
+        prompt: str,
+    ) -> tuple[str, str, Any | None, int, list[TokenTrace]]:
+        try:
+            result = self._ollama_provider.generate(
+                model=request.model,
+                prompt=prompt,
+                max_tokens=max(1, min(request.max_tokens, 4096)),
+                temperature=request.temperature,
+                top_p=request.top_p,
+            )
+        except error.URLError as exc:
+            raise LLMScopeError(
+                code="OLLAMA_UNAVAILABLE",
+                message=(
+                    "Ollama is not running.\n\nInstall from https://ollama.com/\n\nThen run:\n\nollama serve"
+                ),
+                status_code=503,
+            ) from exc
+        except Exception as exc:  # pragma: no cover - depends on local Ollama runtime.
+            message = "The Ollama provider could not generate a response."
+            if self._settings.app_env.lower() == "development":
+                message = f"{message} {exc}"
+            raise LLMScopeError(
+                code="OLLAMA_REQUEST_FAILED",
+                message=message,
+                status_code=502,
+            ) from exc
+
+        tokens = self._build_ollama_token_traces(
+            completion=result.completion,
+            model=request.model,
+            latency_ms=result.latency_ms,
+            finish_reason=result.finish_reason,
+        )
+        usage = SimpleNamespace(
+            input_tokens=result.prompt_tokens,
+            output_tokens=result.completion_tokens,
+            total_tokens=result.total_tokens,
+        )
+        return result.completion, "live", usage, result.latency_ms, tokens
+
+    def _build_model_catalog(self, *, force_refresh: bool = False) -> ModelCatalogResponse:
+        ollama_discovery = self._ollama_provider.discover_models(force_refresh=force_refresh)
+        providers = [
+            ProviderOption(
+                id=ModelProvider.OPENAI,
+                label="OpenAI",
+                status="ready",
+                status_message=None,
+                recommended_models=[],
+                capabilities=OPENAI_PROVIDER_CAPABILITIES_DETAIL,
+            ),
+            ProviderOption(
+                id=ollama_discovery.provider_name,
+                label=ollama_discovery.provider_label,
+                status=ollama_discovery.status,
+                status_message=ollama_discovery.status_message,
+                recommended_models=ollama_discovery.recommended_models,
+                capabilities=self._serialize_provider_capabilities(ollama_discovery.capabilities),
+            ),
+        ]
+        models = [
+            *OPENAI_MODEL_OPTIONS,
+            *[
+                ModelOption(
+                    id=model.id,
+                    label=model.label,
+                    provider=ModelProvider.OLLAMA,
+                    group="Ollama",
+                    status=ollama_discovery.status,
+                    capabilities=self._serialize_provider_capabilities(ollama_discovery.capabilities),
+                )
+                for model in ollama_discovery.models
+            ],
+        ]
+        available_model_ids = {model.id for model in models}
+        default_model = (
+            self._settings.default_model
+            if self._settings.default_model in available_model_ids
+            else OPENAI_MODEL_OPTIONS[1].id
+        )
+        return ModelCatalogResponse(
+            default_provider=ModelProvider.OPENAI,
+            default_model=default_model,
+            default_preset="general",
+            providers=providers,
+            models=models,
+            presets=PRESET_OPTIONS,
+        )
+
+    def _resolve_model_option(
+        self,
+        *,
+        model: str,
+        requested_provider: ModelProvider | None,
+    ) -> ModelOption:
+        catalog = self._build_model_catalog(force_refresh=False)
+        for option in catalog.models:
+            if option.id == model and (
+                requested_provider is None or option.provider == requested_provider
+            ):
+                return option
+
+        provider = self._provider_for_model(model, requested_provider)
+        capabilities = self._serialize_provider_capabilities(
+            self._provider_capabilities_for_model(model, provider)
+        )
+        return ModelOption(
+            id=model,
+            label=model,
+            provider=provider,
+            group="Custom",
+            status="ready",
+            capabilities=capabilities,
+        )
+
+    def _provider_capabilities_for_model(
+        self,
+        model: str,
+        requested_provider: ModelProvider | None = None,
+    ) -> ProviderCapabilities:
+        provider = self._provider_for_model(model, requested_provider)
 
         if provider == ModelProvider.OPENAI:
-            return ProviderCapabilities(
-                supports_native_continuation=False,
-                supports_token_logprobs=True,
-                minimum_output_tokens=16,
-            )
+            return OPENAI_PROVIDER_CAPABILITIES
+
+        if provider == ModelProvider.OLLAMA:
+            return self._ollama_provider.capabilities
 
         return ProviderCapabilities(
             supports_native_continuation=False,
-            supports_token_logprobs=True,
+            supports_token_logprobs=False,
             minimum_output_tokens=1,
+            supports_entropy=False,
+            supports_attention=False,
+            supports_streaming=False,
+            supports_branching=False,
+            supports_continuation=False,
         )
 
-    def _provider_for_model(self, model: str) -> ModelProvider:
-        return MODEL_OPTION_MAP.get(
-            model,
-            ModelOption(
-                id=model,
-                label=model,
-                provider=ModelProvider.OPENAI,
-                group="Custom",
-            ),
-        ).provider
+    def _provider_for_model(
+        self,
+        model: str,
+        requested_provider: ModelProvider | None = None,
+    ) -> ModelProvider:
+        if requested_provider is not None:
+            return requested_provider
+
+        if model in OPENAI_MODEL_OPTION_MAP:
+            return ModelProvider.OPENAI
+
+        discovered = self._ollama_provider.discover_models(force_refresh=False)
+        if any(candidate.id == model for candidate in discovered.models):
+            return ModelProvider.OLLAMA
+
+        return ModelProvider.OPENAI
 
     def _resolve_continuation_mode(
         self,
@@ -703,9 +897,44 @@ class GenerationService:
         capabilities: ProviderCapabilities,
     ) -> ProviderCapabilitiesDetail:
         return ProviderCapabilitiesDetail(
-            supports_native_continuation=capabilities.supports_native_continuation,
-            supports_token_logprobs=capabilities.supports_token_logprobs,
+            supports_logprobs=capabilities.supports_logprobs,
+            supports_entropy=capabilities.supports_entropy,
+            supports_attention=capabilities.supports_attention,
+            supports_exact_continuation=capabilities.supports_exact_continuation,
+            supports_streaming=capabilities.supports_streaming,
+            supports_branching=capabilities.supports_branching,
+            supports_continuation=capabilities.supports_continuation,
             minimum_output_tokens=capabilities.minimum_output_tokens,
+        )
+
+    def _ensure_branching_supported(
+        self,
+        model: str,
+        requested_provider: ModelProvider | None = None,
+    ) -> None:
+        capabilities = self._provider_capabilities_for_model(model, requested_provider)
+        if capabilities.supports_branching:
+            return
+
+        raise LLMScopeError(
+            code="BRANCHING_UNSUPPORTED",
+            message="This provider does not expose token-level alternatives for branching.",
+            status_code=409,
+        )
+
+    def _ensure_continuation_supported(
+        self,
+        model: str,
+        requested_provider: ModelProvider | None = None,
+    ) -> None:
+        capabilities = self._provider_capabilities_for_model(model, requested_provider)
+        if capabilities.supports_continuation:
+            return
+
+        raise LLMScopeError(
+            code="CONTINUATION_UNSUPPORTED",
+            message="This provider does not support LLMScope continuation from graph nodes.",
+            status_code=409,
         )
 
     def _make_segment_id(self, *, source_node_id: str, assistant_prefix: str, model: str) -> str:
@@ -788,7 +1017,7 @@ class GenerationService:
         segment = ContinuationSegment(
             id=segment_id,
             mode=mode,
-            provider=self._provider_for_model(request.model),
+            provider=self._provider_for_model(request.model, request.provider),
             model=request.model,
             source_node_id=request.parent_node_id,
             context_prefix=context.assistant_prefix,
@@ -819,6 +1048,13 @@ class GenerationService:
         for child in children:
             metadata = {
                 **child.metadata,
+                "supports_logprobs": capabilities.supports_logprobs,
+                "supports_entropy": capabilities.supports_entropy,
+                "supports_attention": capabilities.supports_attention,
+                "supports_exact_continuation": capabilities.supports_exact_continuation,
+                "supports_streaming": capabilities.supports_streaming,
+                "supports_branching": capabilities.supports_branching,
+                "supports_continuation": capabilities.supports_continuation,
                 "supports_native_continuation": capabilities.supports_native_continuation,
                 "supports_token_logprobs": capabilities.supports_token_logprobs,
                 "minimum_output_tokens": capabilities.minimum_output_tokens,
@@ -873,7 +1109,7 @@ class GenerationService:
             {
                 "action": action,
                 "mode": mode.value,
-                "provider": str(MODEL_OPTION_MAP.get(request.model, MODEL_OPTIONS[1]).provider),
+                "provider": str(self._provider_for_model(request.model, request.provider)),
                 "model": request.model,
                 "supports_native_continuation": capabilities.supports_native_continuation,
                 "segment_id": segment_id,
@@ -1165,7 +1401,7 @@ class GenerationService:
             assistant_prefix=assistant_prefix,
             template_id=template_id,
         )
-        capabilities = self._provider_capabilities_for_model(request.model)
+        capabilities = self._provider_capabilities_for_model(request.model, request.provider)
         effective_output_tokens = max(capabilities.minimum_output_tokens, max_output_tokens)
         input_items = approximate_request.input_items
 
@@ -1286,7 +1522,7 @@ class GenerationService:
                 }
             )
 
-        capabilities = self._provider_capabilities_for_model(request.model)
+        capabilities = self._provider_capabilities_for_model(request.model, request.provider)
         effective_output_tokens = max(capabilities.minimum_output_tokens, max_output_tokens)
         if self._settings.app_env.lower() == "development" and assistant_prefix:
             logger.debug(
@@ -1392,6 +1628,70 @@ class GenerationService:
                 logprob_entries.extend(getattr(content_part, "logprobs", []) or [])
 
         return "".join(output_text_parts), logprob_entries
+
+    def _build_ollama_token_traces(
+        self,
+        *,
+        completion: str,
+        model: str,
+        latency_ms: int,
+        finish_reason: str | None = None,
+    ) -> list[TokenTrace]:
+        tokens = self._ollama_provider.tokenize(completion)
+        traces: list[TokenTrace] = []
+        context_before = ""
+        per_token_latency = max(1, int(round(latency_ms / max(len(tokens), 1))))
+
+        for index, token in enumerate(tokens):
+            context_after = f"{context_before}{token.decoded_contribution}"
+            traces.append(
+                TokenTrace(
+                    id=self._make_step_id(
+                        branch_id="main",
+                        token_index=index,
+                        token=token.raw_token,
+                    ),
+                    branch_id="main",
+                    parent_node_id="root" if index == 0 else traces[index - 1].id,
+                    model=model,
+                    source="ollama",
+                    index=index,
+                    position=index,
+                    token=token.raw_token,
+                    display_token=token.display_token,
+                    token_bytes=token.token_bytes,
+                    decoded_contribution=token.decoded_contribution,
+                    cumulative_decoded_text=context_after,
+                    cumulative_token_ids=None,
+                    cumulative_log_probability=None,
+                    token_id=None,
+                    tokenizer_id=None,
+                    probability=None,
+                    raw_probability=None,
+                    normalized_displayed_probability=None,
+                    log_probability=None,
+                    entropy=None,
+                    cumulative_probability=None,
+                    latency_ms=per_token_latency,
+                    text_preview=context_after,
+                    context_before=context_before,
+                    context_after=context_after,
+                    finish_reason=finish_reason,
+                    alternatives=[],
+                    generation_step=index,
+                    continuation_mode=ContinuationMode.APPROXIMATE,
+                    metadata={
+                        "branch_id": "main",
+                        "provider": ModelProvider.OLLAMA.value,
+                        "probability_unavailable": True,
+                        "entropy_unavailable": True,
+                        "tokenization_mode": "local_fallback",
+                    },
+                )
+            )
+            context_before = context_after
+
+        return traces
 
     def _build_live_token_traces(
         self,
@@ -2248,7 +2548,7 @@ class GenerationService:
         *,
         tokens: list[TokenTrace],
         position: int,
-        parent_cumulative: float,
+        parent_cumulative: float | None,
         prefix_text: str,
         selected_path: bool,
         node_prefix: str,
@@ -2269,6 +2569,7 @@ class GenerationService:
                 "latency_ms": source.latency_ms,
                 "token_id": source.token_id,
                 "tokenizer_id": source.tokenizer_id,
+                "entropy": source.entropy,
                 "is_main_branch": True,
             }
         ]
@@ -2280,11 +2581,19 @@ class GenerationService:
                 "probability": alternative.raw_probability or alternative.probability,
                 "normalized_displayed_probability": alternative.normalized_displayed_probability
                 or alternative.probability,
-                "log_probability": alternative.log_probability
-                or self._safe_log(alternative.probability),
+                "log_probability": (
+                    alternative.log_probability
+                    if alternative.log_probability is not None
+                    else (
+                        self._safe_log(alternative.probability)
+                        if alternative.probability is not None
+                        else None
+                    )
+                ),
                 "latency_ms": alternative.latency_ms or source.latency_ms,
                 "token_id": alternative.token_id,
                 "tokenizer_id": alternative.tokenizer_id,
+                "entropy": alternative.entropy if alternative.entropy is not None else source.entropy,
                 "is_main_branch": False,
             }
             for alternative in source.alternatives[: branch_width - 1]
@@ -2293,9 +2602,14 @@ class GenerationService:
         children: list[TokenTreeNode] = []
         for rank, candidate in enumerate(candidates, start=1):
             preview = f"{prefix_text}{candidate['token']}"
-            cumulative_probability = round(
-                self._clamp(parent_cumulative * candidate["probability"], MIN_PROBABILITY, 1.0),
-                6,
+            probability_value = candidate["probability"]
+            cumulative_probability = (
+                round(
+                    self._clamp(parent_cumulative * probability_value, MIN_PROBABILITY, 1.0),
+                    6,
+                )
+                if parent_cumulative is not None and probability_value is not None
+                else None
             )
             on_selected_path = selected_path and candidate["is_main_branch"]
             node_id = f"{node_prefix}.{position + 1}.{rank}"
@@ -2312,7 +2626,7 @@ class GenerationService:
                         "normalized_displayed_probability"
                     ],
                     log_probability=candidate["log_probability"],
-                    entropy=source.entropy,
+                    entropy=candidate["entropy"],
                     cumulative_probability=cumulative_probability,
                     latency_ms=candidate["latency_ms"],
                     depth=position + 1,
