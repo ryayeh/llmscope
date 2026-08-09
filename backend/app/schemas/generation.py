@@ -55,7 +55,7 @@ class TokenTrace(BaseModel):
     branch_id: str
     parent_node_id: str | None = None
     model: str
-    source: Literal["openai", "ollama", "demo"]
+    source: Literal["openai", "ollama", "hugging_face", "demo"]
     index: int = Field(..., ge=0)
     position: int = Field(..., ge=0)
     token: str
@@ -164,6 +164,7 @@ class GenerationRequest(BaseModel):
 class GenerationResponse(BaseModel):
     mode: str = Field(default="live")
     prompt_used: str
+    prompt_token_ids: list[int] | None = None
     completion: str
     notes: str
     request: RequestEcho
@@ -196,10 +197,20 @@ class NodeExpansionRequest(BaseModel):
         validation_alias=AliasChoices("assistant_prefix", "parent_text_preview"),
         serialization_alias="assistant_prefix",
     )
+    prompt_token_ids: list[int] | None = Field(default=None)
+    canonical_prefix_token_ids: list[int] | None = Field(default=None)
+    generated_prefix_token_ids: list[int] | None = Field(default=None)
     reconstructed_prompt: str = Field(default="", max_length=60000)
     expected_prompt_length: int | None = Field(default=None, ge=0)
     expected_utf8_length: int | None = Field(default=None, ge=0)
+    expected_assistant_prefix_length: int | None = Field(default=None, ge=0)
+    expected_assistant_prefix_utf8_length: int | None = Field(default=None, ge=0)
     expected_token_count: int | None = Field(default=None, ge=0)
+    selected_token_id: int | None = Field(default=None, ge=0)
+    selected_tokenizer_id: int | None = Field(default=None, ge=0)
+    model_revision: str | None = Field(default=None, max_length=255)
+    tokenizer_identity: str | None = Field(default=None, max_length=500)
+    tokenizer_revision: str | None = Field(default=None, max_length=255)
     depth: int = Field(default=0, ge=0)
     cumulative_probability: float = Field(default=1.0, ge=0, le=1)
     variation: int = Field(default=0, ge=0)
@@ -225,7 +236,7 @@ class NodeExpansionCandidate(BaseModel):
     branch_id: str
     parent_node_id: str
     model: str
-    source: Literal["openai", "ollama", "demo"]
+    source: Literal["openai", "ollama", "hugging_face", "demo"]
     token: str
     display_token: str
     token_bytes: list[int] = Field(default_factory=list)

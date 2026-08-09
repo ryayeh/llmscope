@@ -30,6 +30,8 @@ class ProviderCapabilities:
 class DiscoveredModel:
     id: str
     label: str
+    status: str = "ready"
+    status_message: str | None = None
 
 
 @dataclass(frozen=True)

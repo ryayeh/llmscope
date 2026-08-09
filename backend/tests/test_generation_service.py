@@ -300,6 +300,473 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "CONTINUATION_CONTEXT_MISMATCH")
         self.assertIn("display-only whitespace markers", caught.exception.message)
 
+    def test_huggingface_continuation_context_uses_token_ids_for_exact_validation(self) -> None:
+        request = NodeExpansionRequest(
+            root_prompt="Prompt",
+            provider=ModelProvider.HUGGING_FACE,
+            model="Qwen/Qwen2.5-3B-Instruct",
+            preset="general",
+            temperature=0.0,
+            top_p=1.0,
+            parent_node_id="hf-node-2",
+            parent_token="Ä time",
+            assistant_prefix="The time",
+            prompt_token_ids=[11, 12],
+            canonical_prefix_token_ids=[11, 12, 101, 102],
+            generated_prefix_token_ids=[101, 102],
+            reconstructed_prompt="PromptThe time",
+            expected_prompt_length=len("PromptThe time"),
+            expected_utf8_length=len("PromptThe time".encode("utf-8")),
+            expected_assistant_prefix_length=len("The time"),
+            expected_assistant_prefix_utf8_length=len("The time".encode("utf-8")),
+            expected_token_count=2,
+            selected_token_id=102,
+            selected_tokenizer_id=102,
+            model_revision="resolved-model-sha",
+            tokenizer_identity="Qwen/Qwen2.5-3B-Instruct",
+            tokenizer_revision="resolved-tokenizer-sha",
+            depth=2,
+            cumulative_probability=0.42,
+            variation=0,
+            max_children=4,
+            demo_mode=False,
+        )
+
+        with patch.object(
+            self.service._huggingface_provider,
+            "get_runtime_identity",
+            return_value=SimpleNamespace(
+                model_id="Qwen/Qwen2.5-3B-Instruct",
+                model_revision="resolved-model-sha",
+                tokenizer_identity="Qwen/Qwen2.5-3B-Instruct",
+                tokenizer_revision="resolved-tokenizer-sha",
+            ),
+        ):
+            context = self.service._build_continuation_context(request)
+
+        self.assertEqual(context.prompt_token_ids, [11, 12])
+        self.assertEqual(context.canonical_prefix_token_ids, [11, 12, 101, 102])
+        self.assertEqual(context.generated_prefix_token_ids, [101, 102])
+        self.assertEqual(context.assistant_prefix, "The time")
+        self.assertEqual(context.token_count, 2)
+        self.assertEqual(context.assistant_character_length, 8)
+        self.assertEqual(context.assistant_utf8_length, 8)
+
+    def test_huggingface_continuation_context_rejects_generated_prefix_id_mismatch(self) -> None:
+        request = NodeExpansionRequest(
+            root_prompt="Prompt",
+            provider=ModelProvider.HUGGING_FACE,
+            model="Qwen/Qwen2.5-3B-Instruct",
+            preset="general",
+            temperature=0.0,
+            top_p=1.0,
+            parent_node_id="hf-node-2",
+            parent_token="Ä time",
+            assistant_prefix="The time",
+            prompt_token_ids=[11, 12],
+            canonical_prefix_token_ids=[11, 12, 101, 102],
+            generated_prefix_token_ids=[101, 999],
+            expected_assistant_prefix_length=len("The time"),
+            expected_assistant_prefix_utf8_length=len("The time".encode("utf-8")),
+            expected_token_count=2,
+            selected_token_id=102,
+            selected_tokenizer_id=102,
+            model_revision="resolved-model-sha",
+            tokenizer_identity="Qwen/Qwen2.5-3B-Instruct",
+            tokenizer_revision="resolved-tokenizer-sha",
+            depth=2,
+            cumulative_probability=0.42,
+            variation=0,
+            max_children=4,
+            demo_mode=False,
+        )
+
+        with patch.object(
+            self.service._huggingface_provider,
+            "get_runtime_identity",
+            return_value=SimpleNamespace(
+                model_id="Qwen/Qwen2.5-3B-Instruct",
+                model_revision="resolved-model-sha",
+                tokenizer_identity="Qwen/Qwen2.5-3B-Instruct",
+                tokenizer_revision="resolved-tokenizer-sha",
+            ),
+        ):
+            with self.assertRaises(LLMScopeError) as caught:
+                self.service._build_continuation_context(request)
+
+        self.assertEqual(caught.exception.code, "HF_LOCAL_GENERATED_PREFIX_IDS_MISMATCH")
+
+    def test_huggingface_expansion_children_accept_full_canonical_token_history(self) -> None:
+        request = ContinueGenerationRequest(
+            root_prompt="Prompt",
+            provider=ModelProvider.HUGGING_FACE,
+            model="Qwen/Qwen2.5-3B-Instruct",
+            preset="general",
+            temperature=0.0,
+            top_p=1.0,
+            parent_node_id="hf-node-2",
+            parent_token="Ä time",
+            assistant_prefix="The time",
+            prompt_token_ids=[11, 12],
+            canonical_prefix_token_ids=[11, 12, 101, 102],
+            generated_prefix_token_ids=[101, 102],
+            expected_assistant_prefix_length=len("The time"),
+            expected_assistant_prefix_utf8_length=len("The time".encode("utf-8")),
+            expected_token_count=2,
+            selected_token_id=102,
+            selected_tokenizer_id=102,
+            model_revision="resolved-model-sha",
+            tokenizer_identity="Qwen/Qwen2.5-3B-Instruct",
+            tokenizer_revision="resolved-tokenizer-sha",
+            depth=2,
+            cumulative_probability=0.42,
+            variation=0,
+            max_children=4,
+            demo_mode=False,
+        )
+        trace = TokenTrace(
+            id="hf-trace",
+            branch_id="hf-node-2",
+            parent_node_id="hf-node-2",
+            model="Qwen/Qwen2.5-3B-Instruct",
+            source="hugging_face",
+            index=0,
+            position=0,
+            token="Ä split",
+            display_token="split",
+            token_bytes=list(" split".encode("utf-8")),
+            decoded_contribution=" split",
+            cumulative_decoded_text="The time split",
+            cumulative_token_ids=[11, 12, 101, 102, 103],
+            cumulative_log_probability=math.log(0.2),
+            token_id=103,
+            tokenizer_id=103,
+            probability=0.61,
+            raw_probability=0.61,
+            normalized_displayed_probability=0.74,
+            log_probability=math.log(0.61),
+            entropy=0.31,
+            cumulative_probability=0.2,
+            latency_ms=15,
+            text_preview="The time split",
+            context_before="The time",
+            context_after="The time split",
+            finish_reason=None,
+            alternatives=[
+                AlternativeCandidate(
+                    token="Ä race",
+                    display_token="race",
+                    token_bytes=list(" race".encode("utf-8")),
+                    decoded_contribution=" race",
+                    cumulative_decoded_text="The time race",
+                    cumulative_token_ids=[11, 12, 101, 102, 104],
+                    cumulative_log_probability=math.log(0.1),
+                    probability=0.18,
+                    raw_probability=0.18,
+                    normalized_displayed_probability=0.22,
+                    log_probability=math.log(0.18),
+                    entropy=0.31,
+                    latency_ms=15,
+                    token_id=104,
+                    tokenizer_id=104,
+                    rank=2,
+                    text_preview="The time race",
+                    context_before="The time",
+                    context_after="The time race",
+                    generation_step=0,
+                )
+            ],
+            generation_step=0,
+        )
+
+        children = self.service._build_expansion_children_from_trace(
+            request=request,
+            trace=trace,
+            latency_ms=15,
+        )
+
+        self.assertEqual(children[0].parent_node_id, "hf-node-2")
+        self.assertEqual(children[0].cumulative_token_ids, [11, 12, 101, 102, 103])
+        self.assertEqual(children[1].cumulative_token_ids, [11, 12, 101, 102, 104])
+        self.assertEqual(children[0].generation_step, 2)
+        self.assertEqual(children[0].depth, 3)
+
+    def test_continue_generation_with_huggingface_exact_prefix_attaches_to_selected_parent(self) -> None:
+        captured_generate: dict[str, object] = {}
+
+        request = ContinueGenerationRequest(
+            root_prompt="Prompt",
+            provider=ModelProvider.HUGGING_FACE,
+            model="Qwen/Qwen2.5-3B-Instruct",
+            preset="general",
+            temperature=0.0,
+            top_p=1.0,
+            parent_node_id="hf-node-2",
+            parent_token="Ä time",
+            assistant_prefix="The time",
+            prompt_token_ids=[11, 12],
+            canonical_prefix_token_ids=[11, 12, 101, 102],
+            generated_prefix_token_ids=[101, 102],
+            reconstructed_prompt="PromptThe time",
+            expected_prompt_length=len("PromptThe time"),
+            expected_utf8_length=len("PromptThe time".encode("utf-8")),
+            expected_assistant_prefix_length=len("The time"),
+            expected_assistant_prefix_utf8_length=len("The time".encode("utf-8")),
+            expected_token_count=2,
+            selected_token_id=102,
+            selected_tokenizer_id=102,
+            model_revision="resolved-model-sha",
+            tokenizer_identity="Qwen/Qwen2.5-3B-Instruct",
+            tokenizer_revision="resolved-tokenizer-sha",
+            depth=2,
+            cumulative_probability=0.42,
+            variation=0,
+            max_children=4,
+            demo_mode=False,
+        )
+
+        def fake_generate(**kwargs):
+            captured_generate.update(kwargs)
+            return SimpleNamespace(
+                latency_ms=15,
+                tokens=[
+                    TokenTrace(
+                        id="hf-trace",
+                        branch_id="hf-node-2",
+                        parent_node_id="hf-node-2",
+                        model="Qwen/Qwen2.5-3B-Instruct",
+                        source="hugging_face",
+                        index=0,
+                        position=0,
+                        token="Ä split",
+                        display_token="split",
+                        token_bytes=list(" split".encode("utf-8")),
+                        decoded_contribution=" split",
+                        cumulative_decoded_text="The time split",
+                        cumulative_token_ids=[11, 12, 101, 102, 103],
+                        cumulative_log_probability=math.log(0.2),
+                        token_id=103,
+                        tokenizer_id=103,
+                        probability=0.61,
+                        raw_probability=0.61,
+                        normalized_displayed_probability=0.74,
+                        log_probability=math.log(0.61),
+                        entropy=0.31,
+                        cumulative_probability=0.2,
+                        latency_ms=15,
+                        text_preview="The time split",
+                        context_before="The time",
+                        context_after="The time split",
+                        finish_reason=None,
+                        alternatives=[
+                            AlternativeCandidate(
+                                token="Ä race",
+                                display_token="race",
+                                token_bytes=list(" race".encode("utf-8")),
+                                decoded_contribution=" race",
+                                cumulative_decoded_text="The time race",
+                                cumulative_token_ids=[11, 12, 101, 102, 104],
+                                cumulative_log_probability=math.log(0.1),
+                                probability=0.18,
+                                raw_probability=0.18,
+                                normalized_displayed_probability=0.22,
+                                log_probability=math.log(0.18),
+                                entropy=0.31,
+                                latency_ms=15,
+                                token_id=104,
+                                tokenizer_id=104,
+                                rank=2,
+                                text_preview="The time race",
+                                context_before="The time",
+                                context_after="The time race",
+                                generation_step=0,
+                            )
+                        ],
+                        generation_step=0,
+                    )
+                ],
+            )
+
+        with (
+            patch.object(
+                self.service._huggingface_provider,
+                "get_runtime_identity",
+                return_value=SimpleNamespace(
+                    model_id="Qwen/Qwen2.5-3B-Instruct",
+                    model_revision="resolved-model-sha",
+                    tokenizer_identity="Qwen/Qwen2.5-3B-Instruct",
+                    tokenizer_revision="resolved-tokenizer-sha",
+                ),
+            ),
+            patch.object(
+                self.service._huggingface_provider,
+                "generate",
+                side_effect=fake_generate,
+            ) as mocked_generate,
+            patch.object(
+                self.service._huggingface_provider,
+                "load_model",
+                side_effect=AssertionError("Continuation should not reload the model"),
+            ),
+            patch.object(
+                self.service._huggingface_provider,
+                "unload_model",
+                side_effect=AssertionError("Continuation should not unload the model"),
+            ),
+        ):
+            response = self.service.continue_node(request)
+
+        self.assertEqual(mocked_generate.call_count, 1)
+        self.assertEqual(captured_generate["canonical_prefix_token_ids"], [11, 12, 101, 102])
+        self.assertEqual(captured_generate["prompt_token_ids"], [11, 12])
+        self.assertEqual(response.action, "new_provider_segment")
+        self.assertEqual(response.continuation_mode, ContinuationMode.EXACT)
+        self.assertEqual(response.parent_node_id, "hf-node-2")
+        self.assertEqual(response.children[0].parent_node_id, "hf-node-2")
+        self.assertEqual(response.children[0].token_id, 103)
+        self.assertEqual(response.children[1].token_id, 104)
+        self.assertEqual(response.children[0].cumulative_token_ids, [11, 12, 101, 102, 103])
+        self.assertEqual(response.children[1].cumulative_token_ids, [11, 12, 101, 102, 104])
+        self.assertEqual(response.children[0].probability, 0.61)
+        self.assertEqual(response.children[1].raw_probability, 0.18)
+
+    def test_continue_generation_with_huggingface_selected_alternative_token_id_uses_branch_prefix(self) -> None:
+        captured_generate: dict[str, object] = {}
+
+        request = ContinueGenerationRequest(
+            root_prompt="Prompt",
+            provider=ModelProvider.HUGGING_FACE,
+            model="Qwen/Qwen2.5-3B-Instruct",
+            preset="general",
+            temperature=0.0,
+            top_p=1.0,
+            parent_node_id="hf-alt-2",
+            parent_token="Ä race",
+            assistant_prefix="The race",
+            prompt_token_ids=[11, 12],
+            canonical_prefix_token_ids=[11, 12, 101, 104],
+            generated_prefix_token_ids=[101, 104],
+            expected_assistant_prefix_length=len("The race"),
+            expected_assistant_prefix_utf8_length=len("The race".encode("utf-8")),
+            expected_token_count=2,
+            selected_token_id=104,
+            selected_tokenizer_id=104,
+            model_revision="resolved-model-sha",
+            tokenizer_identity="Qwen/Qwen2.5-3B-Instruct",
+            tokenizer_revision="resolved-tokenizer-sha",
+            depth=2,
+            cumulative_probability=0.18,
+            variation=0,
+            max_children=4,
+            demo_mode=False,
+        )
+
+        def fake_generate(**kwargs):
+            captured_generate.update(kwargs)
+            return SimpleNamespace(
+                latency_ms=11,
+                tokens=[
+                    TokenTrace(
+                        id="hf-branch-trace",
+                        branch_id="hf-alt-2",
+                        parent_node_id="hf-alt-2",
+                        model="Qwen/Qwen2.5-3B-Instruct",
+                        source="hugging_face",
+                        index=0,
+                        position=0,
+                        token="Ä pace",
+                        display_token="pace",
+                        token_bytes=list(" pace".encode("utf-8")),
+                        decoded_contribution=" pace",
+                        cumulative_decoded_text="The race pace",
+                        cumulative_token_ids=[11, 12, 101, 104, 105],
+                        cumulative_log_probability=math.log(0.07),
+                        token_id=105,
+                        tokenizer_id=105,
+                        probability=0.39,
+                        raw_probability=0.39,
+                        normalized_displayed_probability=0.6,
+                        log_probability=math.log(0.39),
+                        entropy=0.41,
+                        cumulative_probability=0.07,
+                        latency_ms=11,
+                        text_preview="The race pace",
+                        context_before="The race",
+                        context_after="The race pace",
+                        finish_reason=None,
+                        alternatives=[],
+                        generation_step=0,
+                    )
+                ],
+            )
+
+        with (
+            patch.object(
+                self.service._huggingface_provider,
+                "get_runtime_identity",
+                return_value=SimpleNamespace(
+                    model_id="Qwen/Qwen2.5-3B-Instruct",
+                    model_revision="resolved-model-sha",
+                    tokenizer_identity="Qwen/Qwen2.5-3B-Instruct",
+                    tokenizer_revision="resolved-tokenizer-sha",
+                ),
+            ),
+            patch.object(
+                self.service._huggingface_provider,
+                "generate",
+                side_effect=fake_generate,
+            ),
+        ):
+            response = self.service.continue_node(request)
+
+        self.assertEqual(captured_generate["canonical_prefix_token_ids"], [11, 12, 101, 104])
+        self.assertEqual(response.children[0].parent_node_id, "hf-alt-2")
+        self.assertEqual(response.children[0].cumulative_token_ids, [11, 12, 101, 104, 105])
+
+    def test_continue_generation_with_huggingface_model_not_ready_returns_503(self) -> None:
+        request = ContinueGenerationRequest(
+            root_prompt="Prompt",
+            provider=ModelProvider.HUGGING_FACE,
+            model="Qwen/Qwen2.5-3B-Instruct",
+            preset="general",
+            temperature=0.0,
+            top_p=1.0,
+            parent_node_id="hf-node-2",
+            parent_token="Ä time",
+            assistant_prefix="The time",
+            prompt_token_ids=[11, 12],
+            canonical_prefix_token_ids=[11, 12, 101, 102],
+            generated_prefix_token_ids=[101, 102],
+            expected_assistant_prefix_length=len("The time"),
+            expected_assistant_prefix_utf8_length=len("The time".encode("utf-8")),
+            expected_token_count=2,
+            selected_token_id=102,
+            selected_tokenizer_id=102,
+            model_revision="resolved-model-sha",
+            tokenizer_identity="Qwen/Qwen2.5-3B-Instruct",
+            tokenizer_revision="resolved-tokenizer-sha",
+            depth=2,
+            cumulative_probability=0.42,
+            variation=0,
+            max_children=4,
+            demo_mode=False,
+        )
+
+        with patch.object(
+            self.service._huggingface_provider,
+            "get_runtime_identity",
+            side_effect=LLMScopeError(
+                code="HF_LOCAL_MODEL_NOT_READY",
+                message="The selected Hugging Face Local model is not loaded. Select the model and click Load before generating.",
+                status_code=503,
+            ),
+        ):
+            with self.assertRaises(LLMScopeError) as caught:
+                self.service.continue_node(request)
+
+        self.assertEqual(caught.exception.code, "HF_LOCAL_MODEL_NOT_READY")
+        self.assertEqual(caught.exception.status_code, 503)
+
     def test_unavailable_logprobs_raise_explicit_error_code(self) -> None:
         with self.assertRaises(LLMScopeError) as caught:
             self.service._raise_logprobs_unavailable()

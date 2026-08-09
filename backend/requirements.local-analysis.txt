@@ -1,0 +1,6 @@
+# Install a CUDA-enabled PyTorch wheel from https://pytorch.org/get-started/locally/
+# before installing this optional local-analysis dependency set.
+torch>=2.7,<3
+transformers>=4.55,<5
+accelerate>=1.10,<2
+safetensors>=0.6,<1

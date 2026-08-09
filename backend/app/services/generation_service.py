@@ -17,6 +17,11 @@ from app.core.config import get_settings
 from app.core.errors import LLMScopeError
 from app.models.provider import ModelProvider
 from app.providers.base import ProviderCapabilities
+from app.providers.huggingface_provider import (
+    HUGGING_FACE_LOCAL_CAPABILITIES_DETAIL,
+    HuggingFaceGenerationResult,
+    HuggingFaceLocalProvider,
+)
 from app.providers.ollama_provider import OllamaProvider
 from app.schemas.generation import (
     AlternativeCandidate,
@@ -34,6 +39,11 @@ from app.schemas.generation import (
     TokenTrace,
     TokenTreeNode,
     TreeSummary,
+)
+from app.schemas.huggingface_local import (
+    HuggingFaceLocalDiagnosticsResponse,
+    HuggingFaceLocalLoadRequest,
+    HuggingFaceLocalStatusResponse,
 )
 from app.schemas.model_catalog import (
     ModelCatalogResponse,
@@ -167,6 +177,8 @@ OPENAI_PROVIDER_CAPABILITIES_DETAIL = ProviderCapabilitiesDetail(
     minimum_output_tokens=16,
 )
 
+HUGGING_FACE_PROVIDER_GROUP = "Hugging Face Local"
+
 OPENAI_MODEL_OPTIONS = [
     ModelOption(
         id="gpt-4o-mini",
@@ -213,9 +225,19 @@ PRESET_OPTION_MAP = {option.id: option for option in PRESET_OPTIONS}
 class ContinuationContext:
     root_prompt: str
     assistant_prefix: str
+    prompt_token_ids: list[int] | None
+    canonical_prefix_token_ids: list[int] | None
+    generated_prefix_token_ids: list[int] | None
+    selected_token_id: int | None
+    selected_tokenizer_id: int | None
+    model_revision: str | None
+    tokenizer_identity: str | None
+    tokenizer_revision: str | None
     reconstructed_prompt: str
     character_length: int
     utf8_length: int
+    assistant_character_length: int
+    assistant_utf8_length: int
     token_count: int
 
 
@@ -427,6 +449,17 @@ class GenerationService:
         self._settings = get_settings()
         self._client: OpenAI | None = None
         self._ollama_provider = OllamaProvider(self._settings.ollama_base_url)
+        self._huggingface_provider = HuggingFaceLocalProvider(
+            default_model=self._settings.hugging_face_default_model,
+            model_revisions={
+                "Qwen/Qwen2.5-1.5B-Instruct": self._settings.hugging_face_qwen_1_5b_revision,
+                "Qwen/Qwen2.5-3B-Instruct": self._settings.hugging_face_qwen_3b_revision,
+            },
+            hf_token=self._settings.hf_token,
+            context_limit=self._settings.hugging_face_context_limit,
+            default_output_tokens=self._settings.hugging_face_default_output_tokens,
+            max_output_tokens=self._settings.hugging_face_max_output_tokens,
+        )
         self._segments_by_id: dict[str, ContinuationSegment] = {}
         try:
             self._ollama_provider.warm_cache()
@@ -435,6 +468,21 @@ class GenerationService:
 
     def list_models(self, *, force_refresh: bool = False) -> ModelCatalogResponse:
         return self._build_model_catalog(force_refresh=force_refresh)
+
+    def get_huggingface_local_status(self) -> HuggingFaceLocalStatusResponse:
+        return self._huggingface_provider.get_status()
+
+    def load_huggingface_local_model(
+        self,
+        request: HuggingFaceLocalLoadRequest,
+    ) -> HuggingFaceLocalStatusResponse:
+        return self._huggingface_provider.load_model(request.model_id)
+
+    def unload_huggingface_local_model(self) -> HuggingFaceLocalStatusResponse:
+        return self._huggingface_provider.unload_model()
+
+    def get_huggingface_local_diagnostics(self) -> HuggingFaceLocalDiagnosticsResponse:
+        return self._huggingface_provider.get_diagnostics()
 
     def build_response(self, request: GenerationRequest) -> GenerationResponse:
         prompt = request.prompt
@@ -449,6 +497,7 @@ class GenerationService:
             request.model,
             request.provider,
         )
+        prompt_token_ids: list[int] | None = None
 
         if request.demo_mode:
             completion, response_mode, usage, latency_ms, tokens = self._build_demo_generation(
@@ -458,6 +507,17 @@ class GenerationService:
                 intent=intent,
                 preset=preset,
             )
+        elif model_option.provider == ModelProvider.HUGGING_FACE:
+            local_result = self._build_huggingface_generation(
+                request=request,
+                prompt=prompt,
+            )
+            completion = local_result.completion
+            response_mode = "live"
+            usage = None
+            latency_ms = local_result.latency_ms
+            tokens = local_result.tokens
+            prompt_token_ids = local_result.prompt_token_ids
         elif model_option.provider == ModelProvider.OLLAMA:
             completion, response_mode, usage, latency_ms, tokens = self._build_ollama_generation(
                 request=request,
@@ -523,13 +583,18 @@ class GenerationService:
             else (
                 "Local Ollama generation. Probabilities and entropy are unavailable because Ollama does not expose token logprobs."
                 if model_option.provider == ModelProvider.OLLAMA
-                else "Live provider response with per-token logprobs."
+                else (
+                    "Direct local Transformers inference with exact token IDs, logprobs, entropy, and alternatives."
+                    if model_option.provider == ModelProvider.HUGGING_FACE
+                    else "Live provider response with per-token logprobs."
+                )
             )
         )
 
         return GenerationResponse(
             mode=response_mode,
             prompt_used=prompt,
+            prompt_token_ids=prompt_token_ids,
             completion=completion,
             notes=notes,
             request=RequestEcho(
@@ -559,6 +624,7 @@ class GenerationService:
         assistant_prefix = context.assistant_prefix
         intent, _ = self._detect_intent(prompt.lower())
         capabilities = self._provider_capabilities_for_model(request.model, request.provider)
+        provider = self._provider_for_model(request.model, request.provider)
 
         if self._settings.app_env.lower() == "development":
             logger.debug(
@@ -579,6 +645,36 @@ class GenerationService:
                 intent=intent,
             )
             notes = "Demo data. Token alternatives are synthetic because Demo Mode is enabled."
+        elif provider == ModelProvider.HUGGING_FACE:
+            local_result = self._huggingface_provider.generate(
+                model=request.model,
+                prompt=prompt,
+                assistant_prefix=assistant_prefix,
+                branch_id=request.parent_node_id,
+                parent_node_id=request.parent_node_id,
+                max_output_tokens=1,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                max_candidates=request.max_children,
+                canonical_prefix_token_ids=context.canonical_prefix_token_ids,
+                prompt_token_ids=context.prompt_token_ids,
+            )
+            if not local_result.tokens:
+                self._raise_logprobs_unavailable()
+            source_trace = local_result.tokens[0]
+            children = self._build_expansion_children_from_trace(
+                request=request,
+                trace=source_trace,
+                latency_ms=local_result.latency_ms,
+            )
+            children = self._apply_continuation_metadata(
+                children=children,
+                capabilities=capabilities,
+                continuation_mode=ContinuationMode.EXACT,
+            )
+            entropy = source_trace.entropy
+            response_mode = "live"
+            notes = "Exact next-token distribution returned from the local token-ID prefix."
         else:
             continuation_mode = self._resolve_continuation_mode(
                 assistant_prefix=assistant_prefix,
@@ -762,8 +858,29 @@ class GenerationService:
         )
         return result.completion, "live", usage, result.latency_ms, tokens
 
+    def _build_huggingface_generation(
+        self,
+        *,
+        request: GenerationRequest,
+        prompt: str,
+    ) -> HuggingFaceGenerationResult:
+        return self._huggingface_provider.generate(
+            model=request.model,
+            prompt=prompt,
+            assistant_prefix="",
+            branch_id="main",
+            parent_node_id="root",
+            max_output_tokens=max(1, min(request.max_tokens, self._settings.hugging_face_max_output_tokens)),
+            temperature=request.temperature,
+            top_p=request.top_p,
+            max_candidates=DEFAULT_TOP_LOGPROBS,
+        )
+
     def _build_model_catalog(self, *, force_refresh: bool = False) -> ModelCatalogResponse:
         ollama_discovery = self._ollama_provider.discover_models(force_refresh=force_refresh)
+        huggingface_discovery = self._huggingface_provider.discover_models(
+            force_refresh=force_refresh
+        )
         providers = [
             ProviderOption(
                 id=ModelProvider.OPENAI,
@@ -772,6 +889,16 @@ class GenerationService:
                 status_message=None,
                 recommended_models=[],
                 capabilities=OPENAI_PROVIDER_CAPABILITIES_DETAIL,
+            ),
+            ProviderOption(
+                id=huggingface_discovery.provider_name,
+                label=huggingface_discovery.provider_label,
+                status=huggingface_discovery.status,
+                status_message=huggingface_discovery.status_message,
+                recommended_models=huggingface_discovery.recommended_models,
+                capabilities=self._serialize_provider_capabilities(
+                    huggingface_discovery.capabilities
+                ),
             ),
             ProviderOption(
                 id=ollama_discovery.provider_name,
@@ -788,9 +915,22 @@ class GenerationService:
                 ModelOption(
                     id=model.id,
                     label=model.label,
+                    provider=ModelProvider.HUGGING_FACE,
+                    group=HUGGING_FACE_PROVIDER_GROUP,
+                    status=model.status,
+                    capabilities=self._serialize_provider_capabilities(
+                        huggingface_discovery.capabilities
+                    ),
+                )
+                for model in huggingface_discovery.models
+            ],
+            *[
+                ModelOption(
+                    id=model.id,
+                    label=model.label,
                     provider=ModelProvider.OLLAMA,
                     group="Ollama",
-                    status=ollama_discovery.status,
+                    status=model.status,
                     capabilities=self._serialize_provider_capabilities(ollama_discovery.capabilities),
                 )
                 for model in ollama_discovery.models
@@ -847,6 +987,9 @@ class GenerationService:
         if provider == ModelProvider.OPENAI:
             return OPENAI_PROVIDER_CAPABILITIES
 
+        if provider == ModelProvider.HUGGING_FACE:
+            return self._huggingface_provider.capabilities
+
         if provider == ModelProvider.OLLAMA:
             return self._ollama_provider.capabilities
 
@@ -871,6 +1014,9 @@ class GenerationService:
 
         if model in OPENAI_MODEL_OPTION_MAP:
             return ModelProvider.OPENAI
+
+        if model in self._huggingface_provider.supported_model_ids:
+            return ModelProvider.HUGGING_FACE
 
         discovered = self._ollama_provider.discover_models(force_refresh=False)
         if any(candidate.id == model for candidate in discovered.models):
@@ -1205,17 +1351,35 @@ class GenerationService:
         preset = request.preset if request.preset in PRESET_OPTION_MAP else "general"
         assistant_prefix = context.assistant_prefix
         intent, _ = self._detect_intent(prompt.lower())
-        steps, _, latency_ms = self._request_live_steps(
-            request=request,
-            prompt=prompt,
-            preset=preset,
-            intent=intent,
-            assistant_prefix=assistant_prefix,
-            branch_id=request.parent_node_id,
-            parent_node_id=request.parent_node_id,
-            max_output_tokens=1,
-            top_logprobs=request.max_children,
-        )
+        provider = self._provider_for_model(request.model, request.provider)
+        if provider == ModelProvider.HUGGING_FACE:
+            local_result = self._huggingface_provider.generate(
+                model=request.model,
+                prompt=prompt,
+                assistant_prefix=assistant_prefix,
+                branch_id=request.parent_node_id,
+                parent_node_id=request.parent_node_id,
+                max_output_tokens=1,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                max_candidates=request.max_children,
+                canonical_prefix_token_ids=context.canonical_prefix_token_ids,
+                prompt_token_ids=context.prompt_token_ids,
+            )
+            steps = local_result.tokens
+            latency_ms = local_result.latency_ms
+        else:
+            steps, _, latency_ms = self._request_live_steps(
+                request=request,
+                prompt=prompt,
+                preset=preset,
+                intent=intent,
+                assistant_prefix=assistant_prefix,
+                branch_id=request.parent_node_id,
+                parent_node_id=request.parent_node_id,
+                max_output_tokens=1,
+                top_logprobs=request.max_children,
+            )
         if not steps:
             self._raise_logprobs_unavailable()
 
@@ -1971,6 +2135,15 @@ class GenerationService:
         trace: TokenTrace,
         latency_ms: int,
     ) -> list[NodeExpansionCandidate]:
+        provider = self._provider_for_model(request.model, request.provider)
+        expected_canonical_prefix = (
+            list(request.canonical_prefix_token_ids)
+            if request.canonical_prefix_token_ids is not None
+            else None
+        )
+        expected_canonical_child_length = (
+            len(expected_canonical_prefix) + 1 if expected_canonical_prefix is not None else None
+        )
         candidates = [
             {
                 "token": trace.token,
@@ -2034,18 +2207,40 @@ class GenerationService:
                 raise LLMScopeError(
                     code="CONTINUATION_CONTEXT_MISMATCH",
                     message="The returned child generation step does not match the canonical prefix length.",
-                    status_code=502,
+                    status_code=409,
                 )
 
-            if (
-                candidate["cumulative_token_ids"] is not None
-                and len(candidate["cumulative_token_ids"]) != request.depth + 1
-            ):
-                raise LLMScopeError(
-                    code="CONTINUATION_CONTEXT_MISMATCH",
-                    message="The returned child token history does not match the canonical decoding step.",
-                    status_code=502,
-                )
+            if candidate["cumulative_token_ids"] is not None:
+                if provider == ModelProvider.HUGGING_FACE and expected_canonical_prefix is not None:
+                    if len(candidate["cumulative_token_ids"]) != expected_canonical_child_length:
+                        raise LLMScopeError(
+                            code="CONTINUATION_CONTEXT_MISMATCH",
+                            message="The returned child token history does not match the canonical Hugging Face token-ID prefix.",
+                            status_code=409,
+                        )
+
+                    if candidate["cumulative_token_ids"][:-1] != expected_canonical_prefix:
+                        raise LLMScopeError(
+                            code="CONTINUATION_CONTEXT_MISMATCH",
+                            message="The returned child token history no longer extends the selected Hugging Face token-ID prefix.",
+                            status_code=409,
+                        )
+
+                    if (
+                        candidate["token_id"] is not None
+                        and candidate["cumulative_token_ids"][-1] != candidate["token_id"]
+                    ):
+                        raise LLMScopeError(
+                            code="CONTINUATION_CONTEXT_MISMATCH",
+                            message="The returned child token ID does not match the canonical Hugging Face token-ID suffix.",
+                            status_code=409,
+                        )
+                elif len(candidate["cumulative_token_ids"]) != request.depth + 1:
+                    raise LLMScopeError(
+                        code="CONTINUATION_CONTEXT_MISMATCH",
+                        message="The returned child token history does not match the canonical decoding step.",
+                        status_code=409,
+                    )
 
             cumulative_probability = round(
                 self._clamp(
@@ -2751,11 +2946,48 @@ class GenerationService:
     ) -> ContinuationContext:
         root_prompt = request.root_prompt
         assistant_prefix = request.assistant_prefix
+        prompt_token_ids = list(request.prompt_token_ids) if request.prompt_token_ids is not None else None
+        canonical_prefix_token_ids = (
+            list(request.canonical_prefix_token_ids)
+            if request.canonical_prefix_token_ids is not None
+            else None
+        )
+        generated_prefix_token_ids = (
+            list(request.generated_prefix_token_ids)
+            if request.generated_prefix_token_ids is not None
+            else None
+        )
         reconstructed_prompt = f"{root_prompt}{assistant_prefix}"
         character_length = len(reconstructed_prompt)
         utf8_length = len(reconstructed_prompt.encode("utf-8"))
+        assistant_character_length = len(assistant_prefix)
+        assistant_utf8_length = len(assistant_prefix.encode("utf-8"))
         token_count = request.depth
         display_markers = ("\u2420", "\u21B5", "\u21E5", "â ", "â†µ", "â‡¥")
+
+        provider = self._provider_for_model(request.model, request.provider)
+
+        if self._settings.app_env.lower() == "development" and provider == ModelProvider.HUGGING_FACE:
+            logger.debug(
+                "HF CONTINUATION REQUEST %s",
+                {
+                    "parent_node_id": request.parent_node_id,
+                    "model": request.model,
+                    "prompt_token_count": len(prompt_token_ids or []),
+                    "prompt_token_tail": (prompt_token_ids or [])[-8:],
+                    "canonical_prefix_token_count": len(canonical_prefix_token_ids or []),
+                    "canonical_prefix_token_tail": (canonical_prefix_token_ids or [])[-8:],
+                    "generated_prefix_token_count": len(generated_prefix_token_ids or []),
+                    "generated_prefix_token_tail": (generated_prefix_token_ids or [])[-8:],
+                    "selected_token_id": request.selected_token_id,
+                    "selected_tokenizer_id": request.selected_tokenizer_id,
+                    "assistant_prefix_characters": assistant_character_length,
+                    "assistant_prefix_utf8_bytes": assistant_utf8_length,
+                    "model_revision": request.model_revision,
+                    "tokenizer_identity": request.tokenizer_identity,
+                    "tokenizer_revision": request.tokenizer_revision,
+                },
+            )
 
         if request.parent_node_id == "root" and assistant_prefix:
             raise LLMScopeError(
@@ -2771,54 +3003,228 @@ class GenerationService:
                 status_code=400,
             )
 
-        if (
-            request.parent_node_id != "root"
-            and request.parent_token
-            and not assistant_prefix.endswith(request.parent_token)
-        ):
-            raise LLMScopeError(
-                code="CONTINUATION_CONTEXT_MISMATCH",
-                message="The assistant prefix no longer ends with the selected raw token.",
-                status_code=400,
-            )
+        if provider == ModelProvider.HUGGING_FACE and assistant_prefix:
+            if prompt_token_ids is None:
+                raise LLMScopeError(
+                    code="HF_LOCAL_PROMPT_TOKEN_IDS_REQUIRED",
+                    message=(
+                        "Hugging Face Local exact continuation requires the original formatted prompt token IDs."
+                    ),
+                    status_code=400,
+                )
 
-        if request.reconstructed_prompt and request.reconstructed_prompt != reconstructed_prompt:
-            raise LLMScopeError(
-                code="CONTINUATION_CONTEXT_MISMATCH",
-                message="The reconstructed continuation prompt no longer matches the raw-token graph context.",
-                status_code=400,
-            )
+            if canonical_prefix_token_ids is None:
+                raise LLMScopeError(
+                    code="HF_LOCAL_CANONICAL_PREFIX_IDS_REQUIRED",
+                    message=(
+                        "Hugging Face Local exact continuation requires canonical cumulative token IDs for the selected branch."
+                    ),
+                    status_code=400,
+                )
 
-        if (
-            request.expected_prompt_length is not None
-            and request.expected_prompt_length != character_length
-        ):
-            raise LLMScopeError(
-                code="CONTINUATION_CONTEXT_MISMATCH",
-                message="The reconstructed continuation character length does not match the graph validation data.",
-                status_code=400,
-            )
+            if generated_prefix_token_ids is None:
+                raise LLMScopeError(
+                    code="HF_LOCAL_GENERATED_PREFIX_IDS_REQUIRED",
+                    message=(
+                        "Hugging Face Local exact continuation requires generated assistant prefix token IDs for the selected branch."
+                    ),
+                    status_code=400,
+                )
 
-        if request.expected_utf8_length is not None and request.expected_utf8_length != utf8_length:
-            raise LLMScopeError(
-                code="CONTINUATION_CONTEXT_MISMATCH",
-                message="The reconstructed continuation byte length does not match the graph validation data.",
-                status_code=400,
-            )
+            if len(canonical_prefix_token_ids) < len(prompt_token_ids):
+                raise LLMScopeError(
+                    code="HF_LOCAL_CANONICAL_PREFIX_IDS_INVALID",
+                    message=(
+                        "The canonical cumulative token-ID prefix is shorter than the original formatted prompt token IDs."
+                    ),
+                    status_code=400,
+                )
 
-        if request.expected_token_count is not None and request.expected_token_count != token_count:
-            raise LLMScopeError(
-                code="CONTINUATION_CONTEXT_MISMATCH",
-                message="The reconstructed continuation token count does not match the graph validation data.",
-                status_code=400,
-            )
+            if canonical_prefix_token_ids[: len(prompt_token_ids)] != prompt_token_ids:
+                raise LLMScopeError(
+                    code="HF_LOCAL_PROMPT_TOKEN_IDS_MISMATCH",
+                    message=(
+                        "The canonical cumulative token-ID prefix no longer starts with the original formatted prompt token IDs."
+                    ),
+                    status_code=400,
+                )
+
+            derived_generated_prefix_token_ids = canonical_prefix_token_ids[len(prompt_token_ids) :]
+            if generated_prefix_token_ids != derived_generated_prefix_token_ids:
+                raise LLMScopeError(
+                    code="HF_LOCAL_GENERATED_PREFIX_IDS_MISMATCH",
+                    message=(
+                        "The generated assistant prefix token IDs no longer match the canonical cumulative token-ID prefix."
+                    ),
+                    status_code=400,
+                )
+
+            if (
+                request.expected_token_count is not None
+                and request.expected_token_count != len(generated_prefix_token_ids)
+            ):
+                raise LLMScopeError(
+                    code="HF_LOCAL_GENERATED_PREFIX_TOKEN_COUNT_MISMATCH",
+                    message=(
+                        "The generated assistant prefix token count no longer matches the canonical token-ID prefix."
+                    ),
+                    status_code=400,
+                )
+
+            if (
+                request.expected_assistant_prefix_length is not None
+                and request.expected_assistant_prefix_length != assistant_character_length
+            ):
+                raise LLMScopeError(
+                    code="HF_LOCAL_ASSISTANT_PREFIX_LENGTH_MISMATCH",
+                    message=(
+                        "The decoded assistant prefix character count no longer matches the Hugging Face Local branch preview."
+                    ),
+                    status_code=400,
+                )
+
+            if (
+                request.expected_assistant_prefix_utf8_length is not None
+                and request.expected_assistant_prefix_utf8_length != assistant_utf8_length
+            ):
+                raise LLMScopeError(
+                    code="HF_LOCAL_ASSISTANT_PREFIX_UTF8_MISMATCH",
+                    message=(
+                        "The decoded assistant prefix byte count no longer matches the Hugging Face Local branch preview."
+                    ),
+                    status_code=400,
+                )
+
+            if request.selected_token_id is not None:
+                if not generated_prefix_token_ids:
+                    raise LLMScopeError(
+                        code="HF_LOCAL_SELECTED_TOKEN_ID_MISSING_PREFIX",
+                        message=(
+                            "The selected Hugging Face Local token ID cannot be validated because the generated token-ID prefix is empty."
+                        ),
+                        status_code=400,
+                    )
+
+                if generated_prefix_token_ids[-1] != request.selected_token_id:
+                    raise LLMScopeError(
+                        code="HF_LOCAL_SELECTED_TOKEN_ID_MISMATCH",
+                        message=(
+                            "The selected Hugging Face Local token ID no longer matches the canonical token-ID prefix."
+                        ),
+                        status_code=400,
+                    )
+
+            if (
+                request.selected_tokenizer_id is not None
+                and request.selected_token_id is not None
+                and request.selected_tokenizer_id != request.selected_token_id
+            ):
+                raise LLMScopeError(
+                    code="HF_LOCAL_SELECTED_TOKENIZER_ID_MISMATCH",
+                    message=(
+                        "The selected Hugging Face Local tokenizer ID no longer matches the canonical token-ID prefix."
+                    ),
+                    status_code=400,
+                )
+
+            runtime_identity = self._huggingface_provider.get_runtime_identity(request.model)
+
+            if request.model_revision and request.model_revision != runtime_identity.model_revision:
+                raise LLMScopeError(
+                    code="HF_LOCAL_MODEL_REVISION_MISMATCH",
+                    message=(
+                        "The selected Hugging Face Local branch was generated with a different model revision than the currently loaded runtime."
+                    ),
+                    status_code=409,
+                )
+
+            if (
+                request.tokenizer_identity
+                and request.tokenizer_identity != runtime_identity.tokenizer_identity
+            ):
+                raise LLMScopeError(
+                    code="HF_LOCAL_TOKENIZER_IDENTITY_MISMATCH",
+                    message=(
+                        "The selected Hugging Face Local branch was generated with a different tokenizer than the currently loaded runtime."
+                    ),
+                    status_code=409,
+                )
+
+            if (
+                request.tokenizer_revision
+                and request.tokenizer_revision != runtime_identity.tokenizer_revision
+            ):
+                raise LLMScopeError(
+                    code="HF_LOCAL_TOKENIZER_REVISION_MISMATCH",
+                    message=(
+                        "The selected Hugging Face Local branch was generated with a different tokenizer revision than the currently loaded runtime."
+                    ),
+                    status_code=409,
+                )
+
+            token_count = len(generated_prefix_token_ids)
+        else:
+            if (
+                request.parent_node_id != "root"
+                and request.parent_token
+                and not assistant_prefix.endswith(request.parent_token)
+            ):
+                raise LLMScopeError(
+                    code="CONTINUATION_CONTEXT_MISMATCH",
+                    message="The assistant prefix no longer ends with the selected raw token.",
+                    status_code=400,
+                )
+
+            if request.reconstructed_prompt and request.reconstructed_prompt != reconstructed_prompt:
+                raise LLMScopeError(
+                    code="CONTINUATION_CONTEXT_MISMATCH",
+                    message="The reconstructed continuation prompt no longer matches the raw-token graph context.",
+                    status_code=400,
+                )
+
+            if (
+                request.expected_prompt_length is not None
+                and request.expected_prompt_length != character_length
+            ):
+                raise LLMScopeError(
+                    code="CONTINUATION_CONTEXT_MISMATCH",
+                    message="The reconstructed continuation character length does not match the graph validation data.",
+                    status_code=400,
+                )
+
+            if (
+                request.expected_utf8_length is not None
+                and request.expected_utf8_length != utf8_length
+            ):
+                raise LLMScopeError(
+                    code="CONTINUATION_CONTEXT_MISMATCH",
+                    message="The reconstructed continuation byte length does not match the graph validation data.",
+                    status_code=400,
+                )
+
+            if request.expected_token_count is not None and request.expected_token_count != token_count:
+                raise LLMScopeError(
+                    code="CONTINUATION_CONTEXT_MISMATCH",
+                    message="The reconstructed continuation token count does not match the graph validation data.",
+                    status_code=400,
+                )
 
         return ContinuationContext(
             root_prompt=root_prompt,
             assistant_prefix=assistant_prefix,
+            prompt_token_ids=prompt_token_ids,
+            canonical_prefix_token_ids=canonical_prefix_token_ids,
+            generated_prefix_token_ids=generated_prefix_token_ids,
+            selected_token_id=request.selected_token_id,
+            selected_tokenizer_id=request.selected_tokenizer_id,
+            model_revision=request.model_revision,
+            tokenizer_identity=request.tokenizer_identity,
+            tokenizer_revision=request.tokenizer_revision,
             reconstructed_prompt=reconstructed_prompt,
             character_length=character_length,
             utf8_length=utf8_length,
+            assistant_character_length=assistant_character_length,
+            assistant_utf8_length=assistant_utf8_length,
             token_count=token_count,
         )
 

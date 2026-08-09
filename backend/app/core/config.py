@@ -21,6 +21,28 @@ class Settings(BaseSettings):
     default_model: str = Field(default="gpt-4.1-mini", alias="DEFAULT_MODEL")
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
+    hf_token: str = Field(default="", alias="HF_TOKEN")
+    hugging_face_context_limit: int = Field(default=2048, alias="HF_CONTEXT_LIMIT")
+    hugging_face_default_output_tokens: int = Field(
+        default=128,
+        alias="HF_DEFAULT_OUTPUT_TOKENS",
+    )
+    hugging_face_max_output_tokens: int = Field(
+        default=512,
+        alias="HF_MAX_OUTPUT_TOKENS",
+    )
+    hugging_face_default_model: str = Field(
+        default="Qwen/Qwen2.5-3B-Instruct",
+        alias="HF_DEFAULT_MODEL",
+    )
+    hugging_face_qwen_1_5b_revision: str = Field(
+        default="",
+        alias="HF_QWEN_1_5B_REVISION",
+    )
+    hugging_face_qwen_3b_revision: str = Field(
+        default="",
+        alias="HF_QWEN_3B_REVISION",
+    )
     backend_cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: [
             "http://localhost:3000",

@@ -76,6 +76,7 @@ import type {
   ContinueGenerationResponse,
   ContinuationMode,
   GenerationResponse,
+  HuggingFaceLocalStatusResponse,
   ModelCatalogResponse,
   ModelOption,
   NodeExpansionResponse,
@@ -106,6 +107,17 @@ const OLLAMA_PROVIDER_CAPABILITIES: ProviderCapabilitiesDetail = {
   minimum_output_tokens: 1,
 };
 
+const HUGGING_FACE_PROVIDER_CAPABILITIES: ProviderCapabilitiesDetail = {
+  supports_logprobs: true,
+  supports_entropy: true,
+  supports_attention: false,
+  supports_exact_continuation: true,
+  supports_streaming: false,
+  supports_branching: true,
+  supports_continuation: true,
+  minimum_output_tokens: 1,
+};
+
 const FALLBACK_MODEL_CATALOG: ModelCatalogResponse = {
   default_provider: "openai",
   default_model: "gpt-4.1-mini",
@@ -119,6 +131,14 @@ const FALLBACK_MODEL_CATALOG: ModelCatalogResponse = {
       capabilities: OPENAI_PROVIDER_CAPABILITIES,
     },
     {
+      id: "hugging_face",
+      label: "Hugging Face Local",
+      status: "ready",
+      status_message: "Select a supported model and click Load to initialize local analysis.",
+      recommended_models: ["Qwen/Qwen2.5-3B-Instruct"],
+      capabilities: HUGGING_FACE_PROVIDER_CAPABILITIES,
+    },
+    {
       id: "ollama",
       label: "Ollama",
       status: "offline",
@@ -129,6 +149,22 @@ const FALLBACK_MODEL_CATALOG: ModelCatalogResponse = {
     },
   ],
   models: [
+    {
+      id: "Qwen/Qwen2.5-3B-Instruct",
+      label: "Qwen2.5 3B Instruct",
+      provider: "hugging_face",
+      group: "Hugging Face Local",
+      status: "ready",
+      capabilities: HUGGING_FACE_PROVIDER_CAPABILITIES,
+    },
+    {
+      id: "Qwen/Qwen2.5-1.5B-Instruct",
+      label: "Qwen2.5 1.5B Instruct",
+      provider: "hugging_face",
+      group: "Hugging Face Local",
+      status: "ready",
+      capabilities: HUGGING_FACE_PROVIDER_CAPABILITIES,
+    },
     {
       id: "gpt-4o-mini",
       label: "GPT-4o mini",
@@ -185,6 +221,7 @@ const SHOULD_LOG_CONTINUATION = process.env.NODE_ENV !== "production";
 type BackendState = "checking" | "online" | "offline";
 type SurfaceTheme = "midnight" | "graphite";
 type ProviderId = ProviderSelectionId;
+type TokenDisplayMode = "decoded" | "raw" | "token_id";
 
 type DecoratedInspectorAlternative = InspectorAlternative & {
   difference: number;
@@ -289,6 +326,14 @@ function formatNumber(value: number | null | undefined) {
   }
 
   return value.toFixed(4);
+}
+
+function formatVram(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "Unavailable";
+  }
+
+  return `${value.toFixed(1)} GB`;
 }
 
 function formatSignedPercent(value: number) {
@@ -455,15 +500,40 @@ function findModelOption(models: ModelOption[], modelId: string): ModelOption {
   );
 }
 
+function getDisplayLabelForTokenMode(
+  node: Pick<TokenNodeData, "kind" | "displayTokenText" | "decodedContribution" | "tokenText" | "tokenId">,
+  mode: TokenDisplayMode,
+) {
+  if (node.kind === "prompt") {
+    return node.displayTokenText;
+  }
+
+  if (mode === "raw") {
+    return node.tokenText || node.displayTokenText;
+  }
+
+  if (mode === "token_id") {
+    return node.tokenId !== null ? `#${node.tokenId}` : node.displayTokenText;
+  }
+
+  return node.displayTokenText || node.decodedContribution || node.tokenText;
+}
+
 function findProviderOption(providers: ProviderOption[], providerId: string): ProviderOption {
+  const fallbackCapabilities =
+    providerId === "ollama"
+      ? OLLAMA_PROVIDER_CAPABILITIES
+      : providerId === "hugging_face"
+        ? HUGGING_FACE_PROVIDER_CAPABILITIES
+        : OPENAI_PROVIDER_CAPABILITIES;
+
   return (
     providers.find((item) => item.id === providerId) ?? {
       id: providerId,
       label: providerId,
       status: "ready",
       recommended_models: [],
-      capabilities:
-        providerId === "ollama" ? OLLAMA_PROVIDER_CAPABILITIES : OPENAI_PROVIDER_CAPABILITIES,
+      capabilities: fallbackCapabilities,
     }
   );
 }
@@ -1981,6 +2051,8 @@ function Workspace() {
   });
   const [isCheckingHealth, setIsCheckingHealth] = useState(false);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
+  const [isLoadingHuggingFaceStatus, setIsLoadingHuggingFaceStatus] = useState(false);
+  const [isSubmittingHuggingFaceAction, setIsSubmittingHuggingFaceAction] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isReplaying, setIsReplaying] = useState(false);
   const [isGraphInteracting, setIsGraphInteracting] = useState(false);
@@ -1989,6 +2061,7 @@ function Workspace() {
   const [surfaceTheme, setSurfaceTheme] = useState<SurfaceTheme>("midnight");
   const [probabilityViewMode, setProbabilityViewMode] =
     useState<ProbabilityViewMode>("raw");
+  const [tokenDisplayMode, setTokenDisplayMode] = useState<TokenDisplayMode>("decoded");
   const [playbackSpeed, setPlaybackSpeed] = useState(DEFAULT_PLAYBACK_SPEED);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResultIndex, setSearchResultIndex] = useState(0);
@@ -1998,6 +2071,8 @@ function Workspace() {
   const [requestVariation, setRequestVariation] = useState(0);
   const [changedTokenIndexes, setChangedTokenIndexes] = useState<number[]>([]);
   const [continuationPreview, setContinuationPreview] = useState<ContinuationPreviewState | null>(null);
+  const [huggingFaceLocalStatus, setHuggingFaceLocalStatus] =
+    useState<HuggingFaceLocalStatusResponse | null>(null);
   const flowRef = useRef<ReactFlowInstance<TokenFlowNode, ProbabilityFlowEdge> | null>(null);
   const nodesRef = useRef<TokenFlowNode[]>([]);
   const edgesRef = useRef<ProbabilityFlowEdge[]>([]);
@@ -2042,6 +2117,7 @@ function Workspace() {
     filteredModels.find((option) => option.id === model)?.capabilities ??
     selectedProviderOption.capabilities ??
     selectedModelOption.capabilities;
+  const isHuggingFaceProvider = selectedProvider === "hugging_face";
   const generationProviderId =
     generation?.request.provider ??
     (generation ? findModelOption(models, generation.request.model).provider : null);
@@ -2052,7 +2128,21 @@ function Workspace() {
   const selectedProviderStatusMessage = selectedProviderOption.status_message ?? null;
   const selectedProviderRecommendations = selectedProviderOption.recommended_models ?? [];
   const selectedProviderReady = selectedProviderOption.status === "ready";
-  const canGenerate = demoMode || (selectedProviderReady && filteredModels.length > 0);
+  const selectedHuggingFaceModelStatus =
+    huggingFaceLocalStatus?.models.find((entry) => entry.id === model) ?? null;
+  const selectedHuggingFaceStatusMessage =
+    selectedHuggingFaceModelStatus?.status_message ??
+    huggingFaceLocalStatus?.status_message ??
+    null;
+  const huggingFaceModelLoaded =
+    huggingFaceLocalStatus?.active_model_id === model &&
+    huggingFaceLocalStatus?.status === "ready";
+  const showHuggingFaceControls = selectedProvider === "hugging_face";
+  const canGenerate =
+    demoMode ||
+    (selectedProviderReady &&
+      filteredModels.length > 0 &&
+      (!isHuggingFaceProvider || huggingFaceModelLoaded));
   const activePathIds = useMemo(
     () => buildActivePathIds(branchChoices, graphNodes),
     [branchChoices, graphNodes],
@@ -2102,6 +2192,7 @@ function Workspace() {
         ...node,
         data: {
           ...node.data,
+          displayTokenText: getDisplayLabelForTokenMode(node.data, tokenDisplayMode),
           displayProbability:
             nodeProbabilityView.get(node.id)?.displayProbability ?? node.data.displayProbability,
           probabilityCoverage:
@@ -2127,6 +2218,7 @@ function Workspace() {
       pinnedSet,
       probabilityViewMode,
       searchMatches,
+      tokenDisplayMode,
     ],
   );
   const displayNodeMap = useMemo(
@@ -2223,6 +2315,9 @@ function Workspace() {
     selectedNode && selectedRecord
       ? getNodeMetrics(selectedRecord.decodedContribution, selectedRecord.tokenBytes)
       : null;
+  const selectedNodeDisplayLabel = selectedNode
+    ? getDisplayLabelForTokenMode(selectedNode.data, tokenDisplayMode)
+    : "Select a token";
   const inspectorCoverage = inspectorAlternativeView.coverage;
   const inspectorRemainingProbabilityMass =
     inspectorAlternativeView.remainingProbabilityMass;
@@ -2475,6 +2570,94 @@ function Workspace() {
     }
   }
 
+  const loadHuggingFaceLocalStatus = useCallback(async () => {
+    setIsLoadingHuggingFaceStatus(true);
+
+    try {
+      const response = await fetch("/api/providers/hugging-face-local", {
+        cache: "no-store",
+      });
+
+      if (!response.ok) {
+        await throwApiError(response);
+      }
+
+      const payload = (await response.json()) as HuggingFaceLocalStatusResponse;
+      setHuggingFaceLocalStatus((currentValue) =>
+        JSON.stringify(currentValue) === JSON.stringify(payload) ? currentValue : payload,
+      );
+    } catch (error) {
+      void error;
+      setHuggingFaceLocalStatus(null);
+    } finally {
+      setIsLoadingHuggingFaceStatus(false);
+    }
+  }, []);
+
+  async function loadSelectedHuggingFaceModel() {
+    if (selectedProvider !== "hugging_face") {
+      return;
+    }
+
+    setIsSubmittingHuggingFaceAction(true);
+    setErrorMessage(null);
+
+    try {
+      const response = await fetch("/api/providers/hugging-face-local/load", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ model_id: model }),
+      });
+
+      if (!response.ok) {
+        await throwApiError(response);
+      }
+
+      const payload = (await response.json()) as HuggingFaceLocalStatusResponse;
+      setHuggingFaceLocalStatus(payload);
+      await loadModelCatalog(true);
+      setBackendState("online");
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unable to load the selected local model.",
+      );
+    } finally {
+      setIsSubmittingHuggingFaceAction(false);
+    }
+  }
+
+  async function unloadHuggingFaceModel() {
+    if (selectedProvider !== "hugging_face") {
+      return;
+    }
+
+    setIsSubmittingHuggingFaceAction(true);
+    setErrorMessage(null);
+
+    try {
+      const response = await fetch("/api/providers/hugging-face-local/unload", {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        await throwApiError(response);
+      }
+
+      const payload = (await response.json()) as HuggingFaceLocalStatusResponse;
+      setHuggingFaceLocalStatus(payload);
+      await loadModelCatalog(true);
+      setBackendState("online");
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unable to unload the local model.",
+      );
+    } finally {
+      setIsSubmittingHuggingFaceAction(false);
+    }
+  }
+
   async function refreshHealth() {
     setIsCheckingHealth(true);
 
@@ -2496,6 +2679,7 @@ function Workspace() {
     }
 
     await loadModelCatalog(true);
+    await loadHuggingFaceLocalStatus();
   }
 
   useEffect(() => {
@@ -2526,13 +2710,14 @@ function Workspace() {
 
       if (isActive) {
         await loadModelCatalog(false);
+        await loadHuggingFaceLocalStatus();
       }
     })();
 
     return () => {
       isActive = false;
     };
-  }, []);
+  }, [loadHuggingFaceLocalStatus]);
 
   const handleProviderChange = useCallback(
     (nextProvider: ProviderId) => {
@@ -3311,10 +3496,20 @@ function Workspace() {
           parent_node_id: nodeId,
           parent_token: node.data.tokenText,
           assistant_prefix: validation.assistantPrefix,
+          prompt_token_ids: validation.promptTokenIds,
+          canonical_prefix_token_ids: validation.canonicalPrefixTokenIds,
+          generated_prefix_token_ids: validation.generatedPrefixTokenIds,
           reconstructed_prompt: validation.reconstructedPrompt,
           expected_prompt_length: validation.characterLength,
           expected_utf8_length: validation.utf8Length,
+          expected_assistant_prefix_length: validation.assistantCharacterLength,
+          expected_assistant_prefix_utf8_length: validation.assistantUtf8Length,
           expected_token_count: validation.tokenCount,
+          selected_token_id: validation.selectedTokenId,
+          selected_tokenizer_id: validation.selectedTokenizerId,
+          model_revision: validation.modelRevision,
+          tokenizer_identity: validation.tokenizerIdentity,
+          tokenizer_revision: validation.tokenizerRevision,
           depth: node.data.depth,
           cumulative_probability: node.data.cumulativeProbability,
           variation: node.data.requestVariation,
@@ -3480,10 +3675,20 @@ function Workspace() {
           parent_node_id: nodeId,
           parent_token: node.data.tokenText,
           assistant_prefix: validation.assistantPrefix,
+          prompt_token_ids: validation.promptTokenIds,
+          canonical_prefix_token_ids: validation.canonicalPrefixTokenIds,
+          generated_prefix_token_ids: validation.generatedPrefixTokenIds,
           reconstructed_prompt: validation.reconstructedPrompt,
           expected_prompt_length: validation.characterLength,
           expected_utf8_length: validation.utf8Length,
+          expected_assistant_prefix_length: validation.assistantCharacterLength,
+          expected_assistant_prefix_utf8_length: validation.assistantUtf8Length,
           expected_token_count: validation.tokenCount,
+          selected_token_id: validation.selectedTokenId,
+          selected_tokenizer_id: validation.selectedTokenizerId,
+          model_revision: validation.modelRevision,
+          tokenizer_identity: validation.tokenizerIdentity,
+          tokenizer_revision: validation.tokenizerRevision,
           depth: node.data.depth,
           cumulative_probability: node.data.cumulativeProbability,
           variation: node.data.requestVariation,
@@ -4256,8 +4461,8 @@ function Workspace() {
 
             <div className="continuation-preview__stats">
               <span>{`${continuationPreview.validation.tokenCount} tokens`}</span>
-              <span>{`${continuationPreview.validation.characterLength} chars`}</span>
-              <span>{`${continuationPreview.validation.utf8Length} bytes`}</span>
+              <span>{`${continuationPreview.validation.assistantCharacterLength} chars`}</span>
+              <span>{`${continuationPreview.validation.assistantUtf8Length} bytes`}</span>
             </div>
 
             {continuationPreview.validation.expectedAssistantPrefix !== null ? (
@@ -4627,12 +4832,87 @@ function Workspace() {
             </select>
           </div>
 
-            {selectedProviderStatusMessage ? (
+            {selectedProviderStatusMessage && !showHuggingFaceControls ? (
               <div className="explorer-note">
                 <p>{selectedProviderStatusMessage}</p>
                 {selectedProviderRecommendations.length > 0 ? (
                   <p>{`Recommended models: ${selectedProviderRecommendations.join(", ")}`}</p>
                 ) : null}
+              </div>
+            ) : null}
+
+            {showHuggingFaceControls ? (
+              <div className="explorer-note">
+                <p>{selectedHuggingFaceStatusMessage ?? "Local analysis requires an explicit model load."}</p>
+                <div className="explorer-chip-row">
+                  <span className="explorer-chip">
+                    {`Status: ${selectedHuggingFaceModelStatus?.status ?? huggingFaceLocalStatus?.status ?? "checking"}`}
+                  </span>
+                  <span className="explorer-chip">
+                    {`Device: ${huggingFaceLocalStatus?.device ?? "Unavailable"}`}
+                  </span>
+                  <span className="explorer-chip">
+                    {`Precision: ${huggingFaceLocalStatus?.precision ?? "Unavailable"}`}
+                  </span>
+                  <span className="explorer-chip">
+                    {`VRAM free: ${formatVram(huggingFaceLocalStatus?.gpu_free_vram_gb)}`}
+                  </span>
+                </div>
+                <div className="explorer-grid explorer-grid--compact">
+                  <button
+                    className="explorer-button explorer-button--primary"
+                    disabled={
+                      isLoadingModels ||
+                      isLoadingHuggingFaceStatus ||
+                      isSubmittingHuggingFaceAction ||
+                      huggingFaceModelLoaded
+                    }
+                    onClick={() => void loadSelectedHuggingFaceModel()}
+                    type="button"
+                  >
+                    {isSubmittingHuggingFaceAction && !huggingFaceModelLoaded ? (
+                      <>
+                        <LoaderCircle className="h-4 w-4 animate-spin" />
+                        Loading...
+                      </>
+                    ) : (
+                      "Load model"
+                    )}
+                  </button>
+                  <button
+                    className="explorer-button explorer-button--ghost"
+                    disabled={
+                      isLoadingModels ||
+                      isLoadingHuggingFaceStatus ||
+                      isSubmittingHuggingFaceAction ||
+                      !huggingFaceLocalStatus?.active_model_id
+                    }
+                    onClick={() => void unloadHuggingFaceModel()}
+                    type="button"
+                  >
+                    Unload model
+                  </button>
+                </div>
+                <div className="explorer-grid explorer-grid--compact">
+                  <select
+                    aria-label="Token display"
+                    className="explorer-input"
+                    onChange={(event) => setTokenDisplayMode(event.target.value as TokenDisplayMode)}
+                    value={tokenDisplayMode}
+                  >
+                    <option value="decoded">Decoded tokens</option>
+                    <option value="raw">Raw tokens</option>
+                    <option value="token_id">Token IDs</option>
+                  </select>
+                  <div className="explorer-note">
+                    <p>
+                      {`Limits: ${huggingFaceLocalStatus?.limits.context_window_tokens ?? 0} ctx / ${huggingFaceLocalStatus?.limits.default_output_tokens ?? 0} default / ${huggingFaceLocalStatus?.limits.max_output_tokens ?? 0} max`}
+                    </p>
+                    {huggingFaceLocalStatus?.active_model_resolved_revision ? (
+                      <p>{`Revision: ${huggingFaceLocalStatus.active_model_resolved_revision}`}</p>
+                    ) : null}
+                  </div>
+                </div>
               </div>
             ) : null}
 
@@ -4722,7 +5002,7 @@ function Workspace() {
             <h2 className="inspector-panel__title">
               {selectedNode?.data.kind === "prompt"
                 ? "Prompt"
-                : selectedNode?.data.displayTokenText ?? "Select a token"}
+                : selectedNodeDisplayLabel}
             </h2>
           </div>
         </div>
@@ -4734,7 +5014,7 @@ function Workspace() {
               <div className="inspector-grid-data">
                 <div>
                   <dt>Chosen token</dt>
-                  <dd>{selectedRecord.displayToken}</dd>
+                  <dd>{selectedNodeDisplayLabel}</dd>
                 </div>
                 <div>
                   <dt>Probability</dt>

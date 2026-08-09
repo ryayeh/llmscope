@@ -83,7 +83,7 @@ export interface TokenTrace {
   branch_id: string;
   parent_node_id?: string | null;
   model: string;
-  source: "openai" | "ollama" | "demo";
+  source: "openai" | "ollama" | "hugging_face" | "demo";
   index: number;
   position: number;
   token: string;
@@ -173,6 +173,7 @@ export interface GenerationStats {
 export interface GenerationResponse {
   mode: string;
   prompt_used: string;
+  prompt_token_ids?: number[] | null;
   completion: string;
   notes: string;
   request: RequestEcho;
@@ -194,10 +195,20 @@ export interface NodeExpansionRequest {
   parent_node_id: string;
   parent_token: string;
   assistant_prefix: string;
+  prompt_token_ids?: number[] | null;
+  canonical_prefix_token_ids?: number[] | null;
+  generated_prefix_token_ids?: number[] | null;
   reconstructed_prompt: string;
   expected_prompt_length?: number | null;
   expected_utf8_length?: number | null;
+  expected_assistant_prefix_length?: number | null;
+  expected_assistant_prefix_utf8_length?: number | null;
   expected_token_count?: number | null;
+  selected_token_id?: number | null;
+  selected_tokenizer_id?: number | null;
+  model_revision?: string | null;
+  tokenizer_identity?: string | null;
+  tokenizer_revision?: string | null;
   depth: number;
   cumulative_probability: number;
   variation: number;
@@ -216,7 +227,7 @@ export interface NodeExpansionCandidate {
   branch_id: string;
   parent_node_id: string;
   model: string;
-  source: "openai" | "ollama" | "demo";
+  source: "openai" | "ollama" | "hugging_face" | "demo";
   token: string;
   display_token: string;
   token_bytes?: number[] | null;
@@ -262,6 +273,80 @@ export interface ContinueGenerationResponse extends NodeExpansionResponse {
   revealed_count: number;
   cached_token_count: number;
   remaining_cached_tokens: number;
+}
+
+export type HuggingFaceLocalState =
+  | "not_downloaded"
+  | "downloading"
+  | "loading"
+  | "ready"
+  | "busy"
+  | "cuda_unavailable"
+  | "oom"
+  | "error";
+
+export interface HuggingFaceLocalModelStatus {
+  id: string;
+  label: string;
+  revision?: string | null;
+  resolved_revision?: string | null;
+  status: HuggingFaceLocalState;
+  status_message?: string | null;
+  downloaded: boolean;
+  loaded: boolean;
+  recommended: boolean;
+}
+
+export interface HuggingFaceLocalLimits {
+  context_window_tokens: number;
+  default_output_tokens: number;
+  max_output_tokens: number;
+  stored_top_alternatives: number;
+}
+
+export interface HuggingFaceLocalStatusResponse {
+  provider: string;
+  label: string;
+  status: HuggingFaceLocalState;
+  status_message?: string | null;
+  capabilities: ProviderCapabilitiesDetail;
+  cuda_available: boolean;
+  busy: boolean;
+  device?: string | null;
+  precision?: string | null;
+  torch_version?: string | null;
+  transformers_version?: string | null;
+  gpu_name?: string | null;
+  gpu_total_vram_gb?: number | null;
+  gpu_free_vram_gb?: number | null;
+  active_model_id?: string | null;
+  active_model_label?: string | null;
+  active_model_revision?: string | null;
+  active_model_resolved_revision?: string | null;
+  recommended_model_id?: string | null;
+  missing_dependencies: string[];
+  limits: HuggingFaceLocalLimits;
+  models: HuggingFaceLocalModelStatus[];
+}
+
+export interface HuggingFaceLocalLoadRequest {
+  model_id: string;
+}
+
+export interface HuggingFaceLocalDiagnosticsResponse {
+  cuda_available: boolean;
+  selected_device?: string | null;
+  selected_dtype?: string | null;
+  torch_version?: string | null;
+  transformers_version?: string | null;
+  torch_cuda_runtime?: string | null;
+  gpu_name?: string | null;
+  gpu_total_vram_gb?: number | null;
+  gpu_free_vram_gb?: number | null;
+  python_version: string;
+  platform: string;
+  disk_free_gb?: number | null;
+  missing_dependencies: string[];
 }
 
 export interface HealthResponse {

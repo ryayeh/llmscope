@@ -127,7 +127,10 @@ export interface ContinuationValidation {
   warnings: string[];
   lineageNodeIds: string[];
   lineageRawTokens: string[];
+  validationMode: "text" | "token_ids";
   rootPrompt: string;
+  promptTokenIds: number[] | null;
+  generatedPrefixTokenIds: number[] | null;
   assistantPrefix: string;
   cumulativeRawText: string;
   backendRequestText: string;
@@ -136,8 +139,16 @@ export interface ContinuationValidation {
   expectedPromptLength: number;
   characterLength: number;
   utf8Length: number;
+  assistantCharacterLength: number;
+  assistantUtf8Length: number;
   tokenCount: number;
+  canonicalPrefixTokenIds: number[] | null;
   cumulativeTokenIds: number[] | null;
+  selectedTokenId: number | null;
+  selectedTokenizerId: number | null;
+  modelRevision: string | null;
+  tokenizerIdentity: string | null;
+  tokenizerRevision: string | null;
   generationStep: number;
 }
 
@@ -172,6 +183,10 @@ const DEFAULT_PROVIDER_CAPABILITIES: ProviderCapabilitiesDetail = {
   supports_continuation: true,
   minimum_output_tokens: 16,
 };
+
+function countCharacters(value: string) {
+  return Array.from(value).length;
+}
 
 function encodeTokenId(timestamp: string, suffix: string) {
   return `${timestamp}:${suffix}`;
@@ -276,6 +291,27 @@ function normalizeMetadata(
   return metadata ? { ...metadata } : {};
 }
 
+function normalizeMetadataWithProvider(
+  metadata: Record<string, string | number | boolean | null> | null | undefined,
+  fallbackProvider?: string | null,
+) {
+  const normalized = normalizeMetadata(metadata);
+
+  if (!readMetadataString(normalized, "provider") && fallbackProvider) {
+    normalized.provider = fallbackProvider;
+  }
+
+  return normalized;
+}
+
+function readMetadataString(
+  metadata: Record<string, string | number | boolean | null>,
+  key: string,
+) {
+  const value = metadata[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
 function encodeTokenFragment(token: string) {
   const bytes = normalizeTokenBytes(token);
   return bytes
@@ -342,6 +378,9 @@ function buildSiblingAlternativeNode(
   alternativeIndex: number,
   existing: TokenGraphNodeRecord | null,
 ): TokenGraphNodeRecord {
+  const providerFallback =
+    readMetadataString(selectedNode.metadata, "provider") ??
+    readMetadataString(parentNode.metadata, "provider");
   const predictionId =
     alternative.nodeId ??
     buildFallbackPredictionId(
@@ -423,7 +462,7 @@ function buildSiblingAlternativeNode(
     reasoningStrategy: selectedNode.reasoningStrategy,
     reasoningFocusTerms: selectedNode.reasoningFocusTerms,
     branchRationale: alternative.rationale ?? null,
-    metadata: normalizeMetadata(alternative.metadata),
+    metadata: normalizeMetadataWithProvider(alternative.metadata, providerFallback),
     providerCapabilities: selectedNode.providerCapabilities,
     sourceAlternatives: [],
     alternativesExpanded: true,
@@ -436,6 +475,7 @@ function mapAlternativeCandidate(
   candidate: AlternativeCandidate,
   parentNode: TokenGraphNodeRecord,
 ): TokenGraphAlternativeRecord {
+  const providerFallback = readMetadataString(parentNode.metadata, "provider");
   const tokenBytes = normalizeTokenBytes(candidate.token, candidate.token_bytes ?? null);
   const decodedContribution =
     candidate.decoded_contribution ??
@@ -484,10 +524,10 @@ function mapAlternativeCandidate(
     latencyMs: candidate.latency_ms ?? null,
     rank: candidate.rank ?? null,
     contextBefore,
-    contextAfter: cumulativeRawText,
+    contextAfter: candidate.context_after ?? cumulativeDecodedText,
     finishReason: candidate.finish_reason ?? null,
     rationale: candidate.rationale ?? null,
-    metadata: normalizeMetadata(candidate.metadata ?? null),
+    metadata: normalizeMetadataWithProvider(candidate.metadata ?? null, providerFallback),
   };
 }
 
@@ -497,6 +537,7 @@ function buildInitialTokenNode(
   generationId: string,
   payload: GenerationResponse,
 ): TokenGraphNodeRecord {
+  const providerFallback = payload.stats.provider;
   const tokenBytes = normalizeTokenBytes(trace.token, trace.token_bytes ?? null);
   const decodedContribution =
     trace.decoded_contribution ??
@@ -546,8 +587,8 @@ function buildInitialTokenNode(
     finishReason: trace.finish_reason ?? null,
     generationDepth: trace.position + 1,
     generationStep: trace.generation_step ?? trace.position,
-    contextBefore: parentNode.cumulativeRawText,
-    contextAfter: cumulativeRawText,
+    contextBefore: trace.context_before ?? parentNode.cumulativeDecodedText,
+    contextAfter: trace.context_after ?? cumulativeDecodedText,
     requestPrompt: payload.prompt_used,
     requestModel: payload.request.model,
     requestPreset: payload.request.preset,
@@ -561,7 +602,7 @@ function buildInitialTokenNode(
     reasoningStrategy: payload.insights.response_strategy,
     reasoningFocusTerms: payload.insights.focus_terms,
     branchRationale: null,
-    metadata: normalizeMetadata(trace.metadata ?? null),
+    metadata: normalizeMetadataWithProvider(trace.metadata ?? null, providerFallback),
     providerCapabilities: payload.provider_capabilities ?? DEFAULT_PROVIDER_CAPABILITIES,
     sourceAlternatives: trace.alternatives.map((candidate) =>
       mapAlternativeCandidate(candidate, parentNode),
@@ -579,6 +620,7 @@ function buildExpansionNode(
   payload: NodeExpansionResponse,
   options: ApplyExpansionOptions,
 ): TokenGraphNodeRecord {
+  const providerFallback = readMetadataString(parentNode.metadata, "provider");
   const tokenBytes = normalizeTokenBytes(candidate.token, candidate.token_bytes ?? null);
   const decodedContribution =
     candidate.decoded_contribution ??
@@ -628,8 +670,8 @@ function buildExpansionNode(
     finishReason: candidate.finish_reason ?? null,
     generationDepth: candidate.depth,
     generationStep: candidate.generation_step ?? Math.max(candidate.depth - 1, 0),
-    contextBefore: parentNode.cumulativeRawText,
-    contextAfter: cumulativeRawText,
+    contextBefore: candidate.context_before ?? parentNode.cumulativeDecodedText,
+    contextAfter: candidate.context_after ?? cumulativeDecodedText,
     requestPrompt: options.requestPrompt,
     requestModel: options.model,
     requestPreset: options.preset,
@@ -643,7 +685,7 @@ function buildExpansionNode(
     reasoningStrategy: parentNode.reasoningStrategy,
     reasoningFocusTerms: parentNode.reasoningFocusTerms,
     branchRationale: candidate.rationale ?? null,
-    metadata: normalizeMetadata(candidate.metadata ?? null),
+    metadata: normalizeMetadataWithProvider(candidate.metadata ?? null, providerFallback),
     providerCapabilities: parentNode.providerCapabilities,
     sourceAlternatives: [],
     alternativesExpanded: false,
@@ -678,7 +720,7 @@ export function createTokenGraphFromGeneration(payload: GenerationResponse): Tok
     decodedContribution: "",
     cumulativeDecodedText: "",
     cumulativeRawText: "",
-    cumulativeTokenIds: [],
+    cumulativeTokenIds: payload.prompt_token_ids ?? [],
     cumulativeLogProbability: 0,
     tokenBytes: normalizeTokenBytes(payload.prompt_used),
     tokenId: null,
@@ -1065,17 +1107,28 @@ export function buildContinuationValidation(
       warnings: ["The selected node does not exist in the token graph."],
       lineageNodeIds: [],
       lineageRawTokens: [],
+      validationMode: "text",
       rootPrompt: graph.rootPrompt,
+      promptTokenIds: null,
+      generatedPrefixTokenIds: null,
       assistantPrefix: "",
       cumulativeRawText: "",
       backendRequestText: "",
       reconstructedPrompt: graph.rootPrompt,
       expectedAssistantPrefix: null,
-      expectedPromptLength: graph.rootPrompt.length,
-      characterLength: graph.rootPrompt.length,
+      expectedPromptLength: countCharacters(graph.rootPrompt),
+      characterLength: countCharacters(graph.rootPrompt),
       utf8Length: textEncoder.encode(graph.rootPrompt).length,
+      assistantCharacterLength: 0,
+      assistantUtf8Length: 0,
       tokenCount: 0,
+      canonicalPrefixTokenIds: null,
       cumulativeTokenIds: null,
+      selectedTokenId: null,
+      selectedTokenizerId: null,
+      modelRevision: null,
+      tokenizerIdentity: null,
+      tokenizerRevision: null,
       generationStep: -1,
     };
   }
@@ -1083,14 +1136,44 @@ export function buildContinuationValidation(
   const lineage = getLineageNodeIds(graph, nodeId);
   const rootNode = graph.rootNodeId ? graph.nodesById[graph.rootNodeId] ?? null : null;
   const rootPrompt = rootNode?.rawToken ?? graph.rootPrompt;
-  const lineageTokens = lineage
+  const promptTokenIds = rootNode?.cumulativeTokenIds ?? null;
+  const rootProvider = rootNode ? readMetadataString(rootNode.metadata, "provider") : null;
+  const lineageRawTokens = lineage
+    .slice(1)
+    .map((currentId) => graph.nodesById[currentId]?.rawToken ?? "");
+  const lineageDecodedContributions = lineage
     .slice(1)
     .map((currentId) => graph.nodesById[currentId]?.decodedContribution ?? "");
-  const lineagePrefix = lineageTokens.join("");
-  const assistantPrefix = node.kind === "token" ? node.cumulativeDecodedText : "";
+  const lineagePrefix = lineageDecodedContributions.join("");
+  const provider = readMetadataString(node.metadata, "provider") ?? rootProvider;
+  const isHuggingFaceValidation = provider === "hugging_face" && node.kind === "token";
+  const cachedAssistantPrefix = node.kind === "token" ? node.cumulativeDecodedText : "";
+  const assistantPrefix =
+    node.kind === "token"
+      ? (isHuggingFaceValidation ? lineagePrefix : cachedAssistantPrefix)
+      : "";
   const backendRequestText = assistantPrefix;
   const reconstructedPrompt = `${rootPrompt}${assistantPrefix}`;
-  const expectedAssistantPrefix = node.kind === "token" ? node.cumulativeDecodedText : "";
+  const expectedAssistantPrefix =
+    node.kind === "token"
+      ? (isHuggingFaceValidation ? assistantPrefix : cachedAssistantPrefix)
+      : "";
+  const assistantUtf8Length = textEncoder.encode(assistantPrefix).length;
+  const canonicalPrefixTokenIds = node.kind === "token" ? node.cumulativeTokenIds : promptTokenIds;
+  const generatedPrefixTokenIds =
+    isHuggingFaceValidation &&
+    promptTokenIds !== null &&
+    canonicalPrefixTokenIds !== null &&
+    canonicalPrefixTokenIds.length >= promptTokenIds.length
+      ? canonicalPrefixTokenIds.slice(promptTokenIds.length)
+      : null;
+  const expectedTokenCount =
+    generatedPrefixTokenIds !== null ? generatedPrefixTokenIds.length : Math.max(lineage.length - 1, 0);
+  const modelRevision =
+    readMetadataString(node.metadata, "resolved_revision") ??
+    readMetadataString(node.metadata, "requested_revision");
+  const tokenizerIdentity = readMetadataString(node.metadata, "tokenizer_identity");
+  const tokenizerRevision = readMetadataString(node.metadata, "tokenizer_revision");
 
   if (!rootNode) {
     warnings.push("The root prompt node is missing.");
@@ -1104,11 +1187,25 @@ export function buildContinuationValidation(
     warnings.push("The reconstructed root prompt no longer matches the original prompt.");
   }
 
-  if (lineagePrefix !== node.cumulativeDecodedText) {
+  if (
+    isHuggingFaceValidation &&
+    cachedAssistantPrefix !== assistantPrefix &&
+    typeof process !== "undefined" &&
+    process.env.NODE_ENV === "development"
+  ) {
+    console.warn("Hugging Face continuation preview ignored stale cached cumulativeDecodedText.", {
+      nodeId,
+      cachedAssistantPrefix,
+      derivedAssistantPrefix: assistantPrefix,
+      tokenCount: generatedPrefixTokenIds?.length ?? Math.max(lineage.length - 1, 0),
+    });
+  }
+
+  if (!isHuggingFaceValidation && lineagePrefix !== node.cumulativeDecodedText) {
     warnings.push("The cached cumulative decoded text no longer matches the decoded node lineage.");
   }
 
-  if (node.kind === "token" && node.parentId) {
+  if (!isHuggingFaceValidation && node.kind === "token" && node.parentId) {
     const expectedContextBefore =
       graph.nodesById[node.parentId]?.kind === "token"
         ? graph.nodesById[node.parentId]?.cumulativeDecodedText ?? ""
@@ -1119,12 +1216,54 @@ export function buildContinuationValidation(
     }
   }
 
-  if (node.kind === "token" && node.contextAfter !== expectedAssistantPrefix) {
+  if (!isHuggingFaceValidation && node.kind === "token" && node.contextAfter !== expectedAssistantPrefix) {
     warnings.push("The stored context through this token no longer matches the canonical cumulative raw text.");
   }
 
-  if (assistantPrefix.length !== expectedAssistantPrefix.length) {
+  if (countCharacters(assistantPrefix) !== countCharacters(expectedAssistantPrefix)) {
     warnings.push("The reconstructed token length does not match the original continuation length.");
+  }
+
+  if (isHuggingFaceValidation) {
+    if (promptTokenIds === null) {
+      warnings.push("The formatted prompt token IDs are missing for this Hugging Face Local branch.");
+    }
+
+    if (canonicalPrefixTokenIds === null) {
+      warnings.push("The canonical cumulative token IDs are missing for this Hugging Face Local branch.");
+    }
+
+    if (
+      promptTokenIds !== null &&
+      canonicalPrefixTokenIds !== null &&
+      canonicalPrefixTokenIds.length < promptTokenIds.length
+    ) {
+      warnings.push("The canonical cumulative token IDs are shorter than the formatted prompt token IDs.");
+    }
+
+    if (generatedPrefixTokenIds === null) {
+      warnings.push("The generated assistant prefix token IDs could not be derived from this Hugging Face Local branch.");
+    }
+
+    if (
+      generatedPrefixTokenIds !== null &&
+      node.tokenId !== null &&
+      generatedPrefixTokenIds.length > 0 &&
+      generatedPrefixTokenIds[generatedPrefixTokenIds.length - 1] !== node.tokenId
+    ) {
+      warnings.push("The selected Hugging Face Local token ID does not match the canonical token-ID prefix.");
+    }
+
+    if (node.parentId) {
+      const parentTokenIds = graph.nodesById[node.parentId]?.cumulativeTokenIds ?? null;
+      if (
+        parentTokenIds !== null &&
+        canonicalPrefixTokenIds !== null &&
+        canonicalPrefixTokenIds.length !== parentTokenIds.length + 1
+      ) {
+        warnings.push("The Hugging Face Local token-ID prefix no longer advances by exactly one token from its parent.");
+      }
+    }
   }
 
   if (node.kind === "token" && node.generationDepth !== Math.max(lineage.length - 1, 0)) {
@@ -1140,18 +1279,29 @@ export function buildContinuationValidation(
     isValid: warnings.length === 0,
     warnings,
     lineageNodeIds: lineage,
-    lineageRawTokens: lineageTokens,
+    lineageRawTokens,
+    validationMode: isHuggingFaceValidation ? "token_ids" : "text",
     rootPrompt,
+    promptTokenIds,
+    generatedPrefixTokenIds,
     assistantPrefix,
-    cumulativeRawText: assistantPrefix,
+    cumulativeRawText: node.kind === "token" ? node.cumulativeRawText : "",
     backendRequestText,
     reconstructedPrompt,
     expectedAssistantPrefix,
-    expectedPromptLength: rootPrompt.length + expectedAssistantPrefix.length,
-    characterLength: reconstructedPrompt.length,
+    expectedPromptLength: countCharacters(reconstructedPrompt),
+    characterLength: countCharacters(reconstructedPrompt),
     utf8Length,
-    tokenCount: Math.max(lineage.length - 1, 0),
+    assistantCharacterLength: countCharacters(assistantPrefix),
+    assistantUtf8Length,
+    tokenCount: expectedTokenCount,
+    canonicalPrefixTokenIds,
     cumulativeTokenIds: node.kind === "token" ? node.cumulativeTokenIds : [],
+    selectedTokenId: node.kind === "token" ? node.tokenId : null,
+    selectedTokenizerId: node.kind === "token" ? node.tokenizerId : null,
+    modelRevision,
+    tokenizerIdentity,
+    tokenizerRevision,
     generationStep: node.kind === "token" ? node.generationStep : -1,
   };
 }
