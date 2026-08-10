@@ -10,11 +10,19 @@ import {
   type ReactNode,
 } from "react";
 
-import { Check, Copy } from "lucide-react";
+import {
+  Bot,
+  Braces,
+  Check,
+  Copy,
+  Settings2,
+  UserRound,
+} from "lucide-react";
 
+import type { CanonicalTokenSourceCategory } from "@/types/api";
 import type { ProbabilityViewMode } from "@/components/canvas/types";
 
-type CurrentRealityTab = "text" | "tokens" | "statistics" | "markdown";
+type CurrentRealityTab = "conversation" | "tokens" | "raw" | "statistics" | "markdown";
 
 export interface CurrentRealityTokenItem {
   decodedContribution: string;
@@ -29,6 +37,66 @@ export interface CurrentRealityTokenItem {
   supportsLogprobs: boolean;
 }
 
+export interface CurrentRealityAttentionTokenItem {
+  attentionWeight: number | null;
+  decodedContribution: string;
+  displayToken: string;
+  fullPosition: number;
+  graphTokenId: string | null;
+  id: string;
+  isPinned: boolean;
+  isQuery: boolean;
+  rawToken: string;
+  sequenceScope: "prompt" | "generated";
+  tokenId: number;
+}
+
+export interface CurrentRealityConversationSection {
+  id: string;
+  label: string;
+  role: "system" | "user" | "assistant";
+  text: string;
+  tokenIds: string[];
+}
+
+export interface CurrentRealityGroupedTokenItem {
+  canonicalPosition: number | null;
+  decodedContribution: string;
+  displayProbability: number | null;
+  displayToken: string;
+  graphTokenId: string | null;
+  id: string;
+  kind: "assistant" | "prompt";
+  rank: number | null;
+  rawProbability: number | null;
+  rawToken: string;
+  sourceCategory: CanonicalTokenSourceCategory | "generated_output";
+  sourceLabel: string;
+  specialToken: boolean;
+  step: number | null;
+  supportsLogprobs: boolean;
+  tokenId: number | null;
+}
+
+export interface CurrentRealityTokenGroup {
+  category: CanonicalTokenSourceCategory | "generated_output";
+  id: string;
+  label: string;
+  tokens: CurrentRealityGroupedTokenItem[];
+}
+
+export interface CurrentRealitySummaryItem {
+  label: string;
+  tone?: "accent" | "approximate" | "exact" | "muted";
+  value: string;
+}
+
+export interface CurrentRealityFormattingSelection {
+  description: string;
+  label: string;
+  token: string;
+}
+
 export interface CurrentRealityStats {
   branchDepth: number;
   displayProbability: number | null;
@@ -41,14 +109,28 @@ export interface CurrentRealityStats {
 }
 
 interface CurrentRealityPanelProps {
+  attentionEnabled?: boolean;
+  attentionHint?: string | null;
+  attentionTokens?: CurrentRealityAttentionTokenItem[];
+  branchBreadcrumb?: string | null;
   collapsed: boolean;
   continuationModeLabel: string;
   continuationModeTitle: string | null;
   continuationModeTone: "exact" | "approximate";
+  conversationSections?: CurrentRealityConversationSection[];
+  copyConversationText?: string;
+  copyRawContextText?: string;
+  copyTokenIdsText?: string;
+  copyUserPromptText?: string;
+  detailItems?: CurrentRealitySummaryItem[];
+  formattingSelection?: CurrentRealityFormattingSelection | null;
   hasContent: boolean;
   probabilityMode: ProbabilityViewMode;
+  promptTokenGroups?: CurrentRealityTokenGroup[];
+  rawContextText?: string;
   remainingProbabilityMass: number;
   selectedTokenId: string | null;
+  summaryItems?: CurrentRealitySummaryItem[];
   stats: CurrentRealityStats;
   supportsEntropy: boolean;
   supportsLogprobs: boolean;
@@ -56,6 +138,7 @@ interface CurrentRealityPanelProps {
   text: string;
   tokens: CurrentRealityTokenItem[];
   topKCoverage: number;
+  onToggleAttentionPin?: (tokenId: string) => void;
   onSelectToken: (tokenId: string) => void;
   onToggleCollapse: () => void;
 }
@@ -74,9 +157,10 @@ type MarkdownBlock =
   | { items: string[]; ordered: boolean; type: "list" };
 
 const TAB_LABELS: Record<CurrentRealityTab, string> = {
+  conversation: "Conversation",
   markdown: "Markdown",
+  raw: "Raw context",
   statistics: "Statistics",
-  text: "Text",
   tokens: "Tokens",
 };
 
@@ -121,7 +205,7 @@ export function normalizeTokenChipLabel(token: CurrentRealityTokenItem) {
     .replace(/\t/g, "⇥");
 }
 
-function formatTokenChipLabel(token: CurrentRealityTokenItem) {
+function formatGroupedTokenChipLabel(token: CurrentRealityGroupedTokenItem) {
   const candidate = token.displayToken || token.decodedContribution || token.rawToken;
 
   if (candidate.trim()) {
@@ -129,6 +213,37 @@ function formatTokenChipLabel(token: CurrentRealityTokenItem) {
   }
 
   return candidate.replace(/ /g, "\u2420").replace(/\n/g, "\u21B5\n").replace(/\t/g, "\u21E5");
+}
+
+function getConversationRoleIcon(role: CurrentRealityConversationSection["role"]) {
+  switch (role) {
+    case "system":
+      return Settings2;
+    case "user":
+      return UserRound;
+    default:
+      return Bot;
+  }
+}
+
+function getSummaryToneClass(item: CurrentRealitySummaryItem) {
+  if (item.tone === "exact") {
+    return " sentence-bar__badge--exact";
+  }
+
+  if (item.tone === "approximate") {
+    return " sentence-bar__badge--approximate";
+  }
+
+  if (item.tone === "accent") {
+    return " sentence-bar__badge--accent";
+  }
+
+  if (item.tone === "muted") {
+    return " sentence-bar__badge--muted";
+  }
+
+  return "";
 }
 
 function renderInlineMarkdown(text: string) {
@@ -427,14 +542,28 @@ function MarkdownPreview({ text }: { text: string }) {
 }
 
 export const CurrentRealityPanel = memo(function CurrentRealityPanel({
+  attentionEnabled = false,
+  attentionHint = null,
+  attentionTokens = [],
+  branchBreadcrumb = null,
   collapsed,
   continuationModeLabel,
   continuationModeTitle,
   continuationModeTone,
+  conversationSections = [],
+  copyConversationText = "",
+  copyRawContextText = "",
+  copyTokenIdsText = "",
+  copyUserPromptText = "",
+  detailItems = [],
+  formattingSelection = null,
   hasContent,
   probabilityMode,
+  promptTokenGroups = [],
+  rawContextText = "",
   remainingProbabilityMass,
   selectedTokenId,
+  summaryItems = [],
   stats,
   supportsEntropy,
   supportsLogprobs,
@@ -442,27 +571,76 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
   text,
   tokens,
   topKCoverage,
+  onToggleAttentionPin,
   onSelectToken,
   onToggleCollapse,
 }: CurrentRealityPanelProps) {
-  const [activeTab, setActiveTab] = useState<CurrentRealityTab>("text");
-  const [copied, setCopied] = useState(false);
+  const [activeTab, setActiveTab] = useState<CurrentRealityTab>("conversation");
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [hoveredTokenId, setHoveredTokenId] = useState<string | null>(null);
   const chipRefs = useRef(new Map<string, HTMLButtonElement>());
   const textRefs = useRef(new Map<string, HTMLSpanElement>());
 
-  const activeTokenId = hoveredTokenId ?? selectedTokenId ?? tokens[tokens.length - 1]?.id ?? null;
-  const activeToken = tokens.find((token) => token.id === activeTokenId) ?? null;
+  const assistantGroupTokens = useMemo<CurrentRealityGroupedTokenItem[]>(
+    () =>
+      tokens.map((token) => ({
+        canonicalPosition: null,
+        decodedContribution: token.decodedContribution,
+        displayProbability: token.displayProbability,
+        displayToken: token.displayToken,
+        graphTokenId: token.id,
+        id: token.id,
+        kind: "assistant",
+        rank: token.rank,
+        rawProbability: token.rawProbability,
+        rawToken: token.rawToken,
+        sourceCategory: "generated_output",
+        sourceLabel: "Generated output",
+        specialToken: false,
+        step: token.step,
+        supportsLogprobs: token.supportsLogprobs,
+        tokenId: null,
+      })),
+    [tokens],
+  );
+  const tokenGroups = useMemo<CurrentRealityTokenGroup[]>(
+    () => [
+      ...promptTokenGroups,
+      ...(assistantGroupTokens.length > 0
+        ? [
+            {
+              category: "generated_output" as const,
+              id: "generated-output",
+              label: "Generated output",
+              tokens: assistantGroupTokens,
+            },
+          ]
+        : []),
+    ],
+    [assistantGroupTokens, promptTokenGroups],
+  );
+  const groupedTokenMap = useMemo(
+    () =>
+      new Map(
+        tokenGroups.flatMap((group) => group.tokens.map((token) => [token.id, token] as const)),
+      ),
+    [tokenGroups],
+  );
+  const activeTokenId =
+    hoveredTokenId ?? selectedTokenId ?? tokens[tokens.length - 1]?.id ?? null;
+  const activeToken = activeTokenId ? groupedTokenMap.get(activeTokenId) ?? null : null;
   const modeLabel = getProbabilityModeLabel(probabilityMode);
+  const stripUsesAttention = attentionEnabled && attentionTokens.length > 0;
+  const showExpandedWorkspace = !collapsed && hasContent;
 
   useEffect(() => {
-    if (!copied) {
+    if (!copiedKey) {
       return;
     }
 
-    const timeoutId = window.setTimeout(() => setCopied(false), 1200);
+    const timeoutId = window.setTimeout(() => setCopiedKey(null), 1200);
     return () => window.clearTimeout(timeoutId);
-  }, [copied]);
+  }, [copiedKey]);
 
   useEffect(() => {
     if (collapsed) {
@@ -485,15 +663,67 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
     onSelectToken(tokenId);
   }
 
-  async function handleCopy() {
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
+  async function handleCopy(copyKey: "assistant" | "conversation" | "raw" | "tokenIds" | "user") {
+    const payload =
+      copyKey === "conversation"
+        ? copyConversationText
+        : copyKey === "raw"
+          ? copyRawContextText
+          : copyKey === "tokenIds"
+            ? copyTokenIdsText
+            : copyKey === "user"
+              ? copyUserPromptText
+              : text;
+
+    await navigator.clipboard.writeText(payload);
+    setCopiedKey(copyKey);
+  }
+
+  function renderInteractiveToken(
+    token: CurrentRealityGroupedTokenItem,
+    options?: {
+      chipRef?: boolean;
+      className?: string;
+      style?: CSSProperties;
+    },
+  ) {
+    const isActive = activeTokenId === token.id;
+    const tokenId = token.graphTokenId ?? token.id;
+
+    return (
+      <button
+        key={token.id}
+        ref={(element) => {
+          if (!options?.chipRef) {
+            return;
+          }
+
+          if (element) {
+            chipRefs.current.set(token.id, element);
+          } else {
+            chipRefs.current.delete(token.id);
+          }
+        }}
+        className={`${options?.className ?? "sentence-token"}${
+          isActive ? " sentence-token--active" : ""
+        }`}
+        onClick={() => focusToken(tokenId)}
+        onMouseEnter={() => setHoveredTokenId(token.id)}
+        onMouseLeave={() => setHoveredTokenId((current) => (current === token.id ? null : current))}
+        style={options?.style}
+        type="button"
+      >
+        {formatGroupedTokenChipLabel(token)}
+      </button>
+    );
   }
 
   return (
     <div
       aria-expanded={!collapsed}
-      className={`sentence-bar${collapsed ? " sentence-bar--collapsed" : ""}`}
+      className={`sentence-bar${collapsed ? " sentence-bar--collapsed" : ""}${
+        !hasContent ? " sentence-bar--empty" : ""
+      }`}
     >
       <div className="sentence-bar__header">
         <div className="sentence-bar__header-copy">
@@ -507,12 +737,15 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
                 {`Mode: ${continuationModeLabel}`}
               </span>
               {supportsLogprobs ? <span className="sentence-bar__badge">{modeLabel}</span> : null}
-              <span className="sentence-bar__badge">{stats.tokenCount} tokens</span>
-              {supportsLogprobs ? (
-                <span className="sentence-bar__badge">
-                  {formatMetricPercent(stats.displayProbability, supportsLogprobs)}
+              <span className="sentence-bar__badge">{stats.tokenCount} output tokens</span>
+              {summaryItems.map((item) => (
+                <span
+                  key={`${item.label}:${item.value}`}
+                  className={`sentence-bar__badge${getSummaryToneClass(item)}`}
+                >
+                  {`${item.label}: ${item.value}`}
                 </span>
-              ) : null}
+              ))}
               {supportsLogprobs && probabilityMode === "raw" && remainingProbabilityMass > 0 ? (
                 <span className="sentence-bar__badge">
                   Other tokens {formatPercent(remainingProbabilityMass)}
@@ -520,7 +753,21 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
               ) : null}
             </div>
           </div>
+          {branchBreadcrumb ? <p className="sentence-bar__breadcrumb">{branchBreadcrumb}</p> : null}
           <p className="sentence-bar__summary">{summary}</p>
+          {!collapsed && detailItems.length > 0 ? (
+            <details className="sentence-bar__details">
+              <summary>Details</summary>
+              <div className="reality-workspace__detail-grid reality-workspace__detail-grid--summary">
+                {detailItems.map((item) => (
+                  <div key={`${item.label}:${item.value}`}>
+                    <dt>{item.label}</dt>
+                    <dd>{item.value}</dd>
+                  </div>
+                ))}
+              </div>
+            </details>
+          ) : null}
         </div>
         {hasContent ? (
           <button
@@ -535,15 +782,23 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
       </div>
 
       <div className="sentence-bar__workspace">
-        <pre className="sentence-bar__line">
-          {text || "Generate a response to start exploring the graph."}
-        </pre>
+        {hasContent ? (
+          <pre className="sentence-bar__line">{text}</pre>
+        ) : (
+          <div className="sentence-bar__empty-state">
+            <p className="reality-workspace__panel-label">Start with a prompt</p>
+            <p className="sentence-bar__summary">
+              Generate a response to inspect the system prompt, user prompt, assistant output,
+              probabilities, branches, and attention from one place.
+            </p>
+          </div>
+        )}
 
-        {!collapsed ? (
+        {showExpandedWorkspace ? (
           <>
             <div className="reality-workspace__tabs">
               {(
-                ["text", "tokens", "statistics", "markdown"] as CurrentRealityTab[]
+                ["conversation", "tokens", "raw", "statistics", "markdown"] as CurrentRealityTab[]
               ).map((tab) => (
                 <button
                   key={tab}
@@ -558,103 +813,177 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
               ))}
             </div>
 
-            <div className="reality-workspace__panel">
-              {(activeTab === "text" || activeTab === "markdown") && (
-                <div className="reality-workspace__panel-header">
-                  <p className="reality-workspace__panel-label">
-                    {activeTab === "text" ? "Generated text" : "Markdown view"}
-                  </p>
-                  <button className="reality-workspace__copy" onClick={() => void handleCopy()} type="button">
-                    {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-                    {copied ? "Copied" : "Copy"}
-                  </button>
-                </div>
-              )}
+            <div className="reality-workspace__actions">
+              <button className="reality-workspace__copy" onClick={() => void handleCopy("conversation")} type="button">
+                {copiedKey === "conversation" ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                {copiedKey === "conversation" ? "Copied conversation" : "Copy conversation"}
+              </button>
+              <button className="reality-workspace__copy" onClick={() => void handleCopy("user")} type="button">
+                {copiedKey === "user" ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                {copiedKey === "user" ? "Copied prompt" : "Copy user prompt"}
+              </button>
+              <button className="reality-workspace__copy" onClick={() => void handleCopy("raw")} type="button">
+                {copiedKey === "raw" ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                {copiedKey === "raw" ? "Copied raw context" : "Copy raw context"}
+              </button>
+              <button
+                className="reality-workspace__copy"
+                onClick={() => void handleCopy("tokenIds")}
+                type="button"
+              >
+                {copiedKey === "tokenIds" ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                {copiedKey === "tokenIds" ? "Copied token IDs" : "Copy token IDs"}
+              </button>
+            </div>
 
-              {activeTab === "text" ? (
+            <div className="reality-workspace__panel">
+              {activeTab === "conversation" ? (
                 <div className="reality-workspace__scroller">
-                  <div className="reality-workspace__text">
-                    {tokens.length > 0 ? (
-                      tokens.map((token) => {
-                        const isActive = activeTokenId === token.id;
-                        return (
-                          <span
-                            key={token.id}
-                            ref={(element) => {
-                              if (element) {
-                                textRefs.current.set(token.id, element);
-                              } else {
-                                textRefs.current.delete(token.id);
-                              }
-                            }}
-                            className={`reality-text-token${isActive ? " reality-text-token--active" : ""}`}
-                            onClick={() => focusToken(token.id)}
-                            onMouseEnter={() => setHoveredTokenId(token.id)}
-                            onMouseLeave={() => setHoveredTokenId((current) => (current === token.id ? null : current))}
-                            role="button"
-                            tabIndex={0}
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter" || event.key === " ") {
-                                event.preventDefault();
-                                focusToken(token.id);
-                              }
-                            }}
-                          >
-                            {token.decodedContribution}
-                          </span>
+                  <div className="reality-conversation">
+                    {conversationSections.map((section) => {
+                      const Icon = getConversationRoleIcon(section.role);
+                      const sectionTokens = section.tokenIds
+                        .map((tokenId) => groupedTokenMap.get(tokenId) ?? null)
+                        .filter(
+                          (token): token is CurrentRealityGroupedTokenItem => Boolean(token),
                         );
-                      })
-                    ) : (
-                      <span>{text || "Generate a response to start exploring the graph."}</span>
-                    )}
+
+                      return (
+                        <section
+                          key={section.id}
+                          className={`reality-conversation__card reality-conversation__card--${section.role}`}
+                        >
+                          <div className="reality-conversation__header">
+                            <span className="reality-conversation__icon">
+                              <Icon className="h-4 w-4" />
+                            </span>
+                            <p className="reality-conversation__label">{section.label}</p>
+                          </div>
+                          <div className="reality-conversation__body">
+                            {sectionTokens.length > 0 ? (
+                              sectionTokens.map((token) => {
+                                const isActive = activeTokenId === token.id;
+                                const tokenId = token.graphTokenId ?? token.id;
+
+                                return (
+                                  <span
+                                    key={token.id}
+                                    ref={(element) => {
+                                      if (element) {
+                                        textRefs.current.set(token.id, element);
+                                      } else {
+                                        textRefs.current.delete(token.id);
+                                      }
+                                    }}
+                                    className={`reality-text-token${
+                                      isActive ? " reality-text-token--active" : ""
+                                    }`}
+                                    onClick={() => focusToken(tokenId)}
+                                    onMouseEnter={() => setHoveredTokenId(token.id)}
+                                    onMouseLeave={() =>
+                                      setHoveredTokenId((current) =>
+                                        current === token.id ? null : current,
+                                      )
+                                    }
+                                    onKeyDown={(event) => {
+                                      if (event.key === "Enter" || event.key === " ") {
+                                        event.preventDefault();
+                                        focusToken(tokenId);
+                                      }
+                                    }}
+                                    role="button"
+                                    tabIndex={0}
+                                  >
+                                    {token.decodedContribution}
+                                  </span>
+                                );
+                              })
+                            ) : (
+                              <pre className="reality-conversation__text">{section.text || "None"}</pre>
+                            )}
+                          </div>
+                        </section>
+                      );
+                    })}
+
+                    {formattingSelection ? (
+                      <div className="reality-conversation__formatting">
+                        <span className="reality-conversation__icon">
+                          <Braces className="h-4 w-4" />
+                        </span>
+                        <div>
+                          <p className="reality-conversation__label">{formattingSelection.label}</p>
+                          <p className="reality-conversation__formatting-copy">
+                            {`${formattingSelection.description}: ${formattingSelection.token}`}
+                          </p>
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               ) : null}
 
               {activeTab === "tokens" ? (
                 <div className="reality-workspace__tokens-panel">
-                  <div className="reality-workspace__timeline">
-                    {tokens.length > 0 ? (
-                      tokens.map((token) => {
-                        const isActive = activeTokenId === token.id;
-                        return (
-                          <button
-                            key={token.id}
-                            className={`sentence-token${token.isChanged ? " sentence-token--changed" : ""}${
-                              isActive ? " sentence-token--active" : ""
-                            }`}
-                            onClick={() => focusToken(token.id)}
-                            onMouseEnter={() => setHoveredTokenId(token.id)}
-                            onMouseLeave={() => setHoveredTokenId((current) => (current === token.id ? null : current))}
-                            style={
-                              {
-                                "--sentence-strength": `${
-                                  token.supportsLogprobs
-                                    ? Math.max(token.displayProbability, 0.08)
-                                    : 0.38
-                                }`,
-                              } as CSSProperties
-                            }
-                            type="button"
-                          >
-                            {formatTokenChipLabel(token)}
-                          </button>
-                        );
-                      })
-                    ) : (
-                      <div className="reality-workspace__empty">No generated tokens yet.</div>
-                    )}
-                  </div>
+                  {tokenGroups.length > 0 ? (
+                    tokenGroups.map((group) => (
+                      <section key={group.id} className="reality-token-group">
+                        <div className="reality-workspace__panel-header">
+                          <p className="reality-workspace__panel-label">{group.label}</p>
+                          <span className="sentence-bar__badge">
+                            {`${group.tokens.length} token${group.tokens.length === 1 ? "" : "s"}`}
+                          </span>
+                        </div>
+                        <div className="reality-workspace__timeline">
+                          {group.tokens.map((token) =>
+                            renderInteractiveToken(token, {
+                              className: `sentence-token${
+                                token.kind === "prompt" ? " sentence-token--prompt-scope" : ""
+                              }`,
+                              style:
+                                token.kind === "assistant"
+                                  ? ({
+                                      "--sentence-strength": `${
+                                        token.supportsLogprobs
+                                          ? Math.max(token.displayProbability ?? 0, 0.08)
+                                          : 0.38
+                                      }`,
+                                    } as CSSProperties)
+                                  : undefined,
+                            }),
+                          )}
+                        </div>
+                      </section>
+                    ))
+                  ) : (
+                    <div className="reality-workspace__empty">No canonical tokens available yet.</div>
+                  )}
 
                   {activeToken ? (
                     <div className="reality-workspace__detail-grid">
                       <div>
                         <dt>Display</dt>
-                        <dd>{activeToken.displayToken || formatTokenChipLabel(activeToken)}</dd>
+                        <dd>{activeToken.displayToken || formatGroupedTokenChipLabel(activeToken)}</dd>
                       </div>
                       <div>
                         <dt>Decoded</dt>
                         <dd>{activeToken.decodedContribution || "<empty>"}</dd>
+                      </div>
+                      <div>
+                        <dt>Raw token</dt>
+                        <dd>{activeToken.rawToken || "<empty>"}</dd>
+                      </div>
+                      <div>
+                        <dt>Token id</dt>
+                        <dd>{activeToken.tokenId ?? "Unavailable"}</dd>
+                      </div>
+                      <div>
+                        <dt>Source</dt>
+                        <dd>{activeToken.sourceLabel}</dd>
+                      </div>
+                      <div>
+                        <dt>{activeToken.kind === "prompt" ? "Position" : "Step"}</dt>
+                        <dd>{activeToken.kind === "prompt" ? activeToken.canonicalPosition : activeToken.step}</dd>
                       </div>
                       <div>
                         <dt>Displayed probability</dt>
@@ -674,16 +1003,23 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
                           )}
                         </dd>
                       </div>
-                      <div>
-                        <dt>Rank</dt>
-                        <dd>{activeToken.rank}</dd>
-                      </div>
-                      <div>
-                        <dt>Step</dt>
-                        <dd>{activeToken.step}</dd>
-                      </div>
                     </div>
                   ) : null}
+                </div>
+              ) : null}
+
+              {activeTab === "raw" ? (
+                <div className="reality-workspace__scroller">
+                  <div className="reality-workspace__panel-header">
+                    <p className="reality-workspace__panel-label">Exact raw context</p>
+                    <button className="reality-workspace__copy" onClick={() => void handleCopy("raw")} type="button">
+                      {copiedKey === "raw" ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                      {copiedKey === "raw" ? "Copied" : "Copy"}
+                    </button>
+                  </div>
+                  <pre className="reality-workspace__raw">
+                    {rawContextText || "Raw context is unavailable for this provider response."}
+                  </pre>
                 </div>
               ) : null}
 
@@ -706,7 +1042,7 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
                     <dd>{formatLatency(stats.latency)}</dd>
                   </div>
                   <div>
-                    <dt>Token count</dt>
+                    <dt>Output token count</dt>
                     <dd>{stats.tokenCount}</dd>
                   </div>
                   <div>
@@ -719,57 +1055,82 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
                   </div>
                   <div>
                     <dt>Other tokens</dt>
-                    <dd>
-                      {supportsLogprobs ? formatPercent(remainingProbabilityMass) : "Unavailable"}
-                    </dd>
+                    <dd>{supportsLogprobs ? formatPercent(remainingProbabilityMass) : "Unavailable"}</dd>
                   </div>
                 </div>
               ) : null}
 
               {activeTab === "markdown" ? (
                 <div className="reality-workspace__scroller">
+                  <div className="reality-workspace__panel-header">
+                    <p className="reality-workspace__panel-label">Assistant markdown</p>
+                    <button
+                      className="reality-workspace__copy"
+                      onClick={() => void handleCopy("assistant")}
+                      type="button"
+                    >
+                      {copiedKey === "assistant" ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                      {copiedKey === "assistant" ? "Copied" : "Copy assistant"}
+                    </button>
+                  </div>
                   <MarkdownPreview text={text} />
                 </div>
               ) : null}
             </div>
 
             <div className="reality-workspace__strip">
-              <p className="reality-workspace__panel-label">Pinned token strip</p>
+              <div className="reality-workspace__panel-header">
+                <p className="reality-workspace__panel-label">
+                  {stripUsesAttention ? "Attention strip" : "Pinned token strip"}
+                </p>
+                {stripUsesAttention && attentionHint ? (
+                  <span className="reality-workspace__attention-hint" title={attentionHint}>
+                    Attention Lens
+                  </span>
+                ) : null}
+              </div>
               <div className="reality-workspace__strip-track">
-                {tokens.length > 0 ? (
-                  tokens.map((token) => {
-                    const isActive = activeTokenId === token.id;
-                    return (
-                      <button
-                        key={token.id}
-                        ref={(element) => {
-                          if (element) {
-                            chipRefs.current.set(token.id, element);
-                          } else {
-                            chipRefs.current.delete(token.id);
-                          }
-                        }}
-                        className={`sentence-token${token.isChanged ? " sentence-token--changed" : ""}${
-                          isActive ? " sentence-token--active" : ""
-                        }`}
-                        onClick={() => focusToken(token.id)}
-                        onMouseEnter={() => setHoveredTokenId(token.id)}
-                        onMouseLeave={() => setHoveredTokenId((current) => (current === token.id ? null : current))}
-                        style={
-                          {
-                            "--sentence-strength": `${
-                              token.supportsLogprobs
-                                ? Math.max(token.displayProbability, 0.08)
-                                : 0.38
-                            }`,
-                          } as CSSProperties
-                        }
-                        type="button"
-                      >
-                        {formatTokenChipLabel(token)}
-                      </button>
-                    );
-                  })
+                {stripUsesAttention ? (
+                  attentionTokens.map((token) => (
+                    <button
+                      key={token.id}
+                      className={`sentence-token sentence-token--attention${
+                        token.sequenceScope === "prompt" ? " sentence-token--prompt-scope" : ""
+                      }${token.isQuery ? " sentence-token--query" : ""}${
+                        token.isPinned ? " sentence-token--attention-pinned" : ""
+                      }`}
+                      onClick={() => onToggleAttentionPin?.(token.id)}
+                      style={
+                        {
+                          "--attention-weight": `${Math.max(token.attentionWeight ?? 0, 0)}`,
+                        } as CSSProperties
+                      }
+                      title={`${token.displayToken || token.decodedContribution || token.rawToken}
+Weight: ${
+                        typeof token.attentionWeight === "number"
+                          ? formatPercent(token.attentionWeight)
+                          : "Unavailable"
+                      }
+Position: ${token.fullPosition}`}
+                      type="button"
+                    >
+                      {token.displayToken || token.decodedContribution || token.rawToken}
+                    </button>
+                  ))
+                ) : assistantGroupTokens.length > 0 ? (
+                  assistantGroupTokens.map((token) =>
+                    renderInteractiveToken(token, {
+                      chipRef: true,
+                      className: "sentence-token",
+                      style: {
+                        "--sentence-strength": `${
+                          token.supportsLogprobs
+                            ? Math.max(token.displayProbability ?? 0, 0.08)
+                            : 0.38
+                        }`,
+                      } as CSSProperties,
+                    }),
+                  )
                 ) : (
                   <span className="sentence-bar__placeholder">
                     Generate a response, then click around the graph to switch realities.

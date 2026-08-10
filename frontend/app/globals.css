@@ -1377,6 +1377,15 @@ button {
   animation: none;
 }
 
+.attention-edge {
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.attention-edge--glow {
+  animation: none;
+}
+
 @keyframes edgePulse {
   from {
     stroke-dasharray: 14 14;
@@ -1571,6 +1580,7 @@ button {
 .llmscope-app .top-toolbar,
 .llmscope-app .sentence-bar,
 .llmscope-app .compare-strip,
+.llmscope-app .generation-panel,
 .llmscope-app .explorer-dock,
 .llmscope-app .inspector-panel,
 .llmscope-app .canvas-hint,
@@ -1817,6 +1827,16 @@ button {
   color: #fcd34d;
 }
 
+.llmscope-app .sentence-bar__badge--accent {
+  background: rgba(56, 189, 248, 0.16);
+  color: #c9f4ff;
+}
+
+.llmscope-app .sentence-bar__badge--muted {
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--text-muted);
+}
+
 .llmscope-app .sentence-bar__eyebrow,
 .llmscope-app .explorer-dock__eyebrow,
 .llmscope-app .inspector-panel__eyebrow,
@@ -1833,6 +1853,13 @@ button {
   line-height: 1.45;
 }
 
+.llmscope-app .sentence-bar__breadcrumb {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
 .llmscope-app .sentence-bar__line {
   margin: 0;
   font-size: clamp(15px, 1.45vw, 19px);
@@ -1845,6 +1872,17 @@ button {
   flex: 1 1 auto;
   flex-direction: column;
   gap: 8px;
+}
+
+.llmscope-app .sentence-bar--empty {
+  max-height: 150px;
+}
+
+.llmscope-app .sentence-bar__empty-state {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
 }
 
 .llmscope-app .sentence-bar__line {
@@ -1863,6 +1901,12 @@ button {
 }
 
 .llmscope-app .reality-workspace__tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.llmscope-app .reality-workspace__actions {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -1890,6 +1934,24 @@ button {
   min-height: 0;
   flex-direction: column;
   gap: 8px;
+}
+
+.llmscope-app .sentence-bar__details {
+  margin-top: 2px;
+}
+
+.llmscope-app .sentence-bar__details > summary {
+  cursor: pointer;
+  list-style: none;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.llmscope-app .sentence-bar__details > summary::-webkit-details-marker {
+  display: none;
 }
 
 .llmscope-app .reality-workspace__panel-header,
@@ -1970,6 +2032,11 @@ button {
   gap: 6px;
 }
 
+.llmscope-app .reality-workspace__detail-grid--summary {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 8px;
+}
+
 .llmscope-app .reality-workspace__detail-grid div {
   padding: 8px 10px;
   border-radius: 12px;
@@ -2002,12 +2069,33 @@ button {
   background: linear-gradient(180deg, transparent, rgba(7, 12, 24, 0.94) 22%);
 }
 
+.llmscope-app .reality-workspace__attention-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(139, 92, 246, 0.14);
+  color: #ddd6fe;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .llmscope-app .reality-workspace__empty {
   padding: 10px 12px;
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.03);
   color: var(--text-muted);
   font-size: 12px;
+}
+
+.llmscope-app .attention-source-list__summary {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .llmscope-app .sentence-token {
@@ -2017,10 +2105,269 @@ button {
   font-weight: 600;
 }
 
+.llmscope-app .reality-conversation {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.llmscope-app .reality-conversation__card,
+.llmscope-app .reality-conversation__formatting,
+.llmscope-app .reality-token-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.028);
+}
+
+.llmscope-app .reality-conversation__card--system {
+  border: 1px solid rgba(167, 139, 250, 0.14);
+  background: linear-gradient(180deg, rgba(167, 139, 250, 0.06), rgba(255, 255, 255, 0.02));
+}
+
+.llmscope-app .reality-conversation__card--user {
+  border: 1px solid rgba(45, 212, 191, 0.14);
+  background: linear-gradient(180deg, rgba(45, 212, 191, 0.05), rgba(255, 255, 255, 0.02));
+}
+
+.llmscope-app .reality-conversation__card--assistant {
+  border: 1px solid rgba(56, 189, 248, 0.14);
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.055), rgba(255, 255, 255, 0.02));
+}
+
+.llmscope-app .reality-conversation__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.llmscope-app .reality-conversation__icon {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-secondary);
+}
+
+.llmscope-app .reality-conversation__label {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.llmscope-app .reality-conversation__body {
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.llmscope-app .reality-conversation__text,
+.llmscope-app .reality-workspace__raw {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.llmscope-app .reality-conversation__formatting-copy {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.llmscope-app .sentence-token--attention {
+  border: 1px solid rgba(139, 92, 246, 0.18);
+  background:
+    linear-gradient(180deg, rgba(139, 92, 246, 0.08), rgba(139, 92, 246, 0.04)),
+    rgba(255, 255, 255, 0.02);
+  color: #ede9fe;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.02),
+    0 0 0 calc(max(var(--attention-weight, 0), 0.03) * 8px)
+      rgba(139, 92, 246, calc(0.04 + max(var(--attention-weight, 0), 0.03) * 0.18));
+}
+
+.llmscope-app .sentence-token--prompt-scope {
+  border-color: rgba(56, 189, 248, 0.18);
+  background:
+    linear-gradient(180deg, rgba(56, 189, 248, 0.08), rgba(56, 189, 248, 0.04)),
+    rgba(255, 255, 255, 0.02);
+  color: #e0f2fe;
+}
+
+.llmscope-app .sentence-token--query {
+  border-color: rgba(251, 191, 36, 0.34);
+  box-shadow:
+    0 0 0 1px rgba(251, 191, 36, 0.2),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+
+.llmscope-app .sentence-token--attention-pinned {
+  border-color: rgba(192, 132, 252, 0.42);
+  box-shadow:
+    0 0 0 1px rgba(192, 132, 252, 0.22),
+    0 0 16px rgba(192, 132, 252, 0.22);
+}
+
 .llmscope-app .sentence-token--active {
   border-color: rgba(56, 189, 248, 0.3);
   color: var(--text-primary);
   box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.14);
+}
+
+.llmscope-app .attention-controls__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.llmscope-app .attention-controls__row--dense {
+  justify-content: flex-start;
+}
+
+.llmscope-app .attention-controls__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.llmscope-app .attention-controls__label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.llmscope-app .attention-controls__hint {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.llmscope-app .attention-controls__hint--muted {
+  color: var(--text-muted);
+}
+
+.llmscope-app .attention-controls__static {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  padding: 0 10px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.36);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.llmscope-app .attention-summary {
+  display: grid;
+  gap: 6px;
+}
+
+.llmscope-app .attention-summary__title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.llmscope-app .attention-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.llmscope-app .attention-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.llmscope-app .attention-legend__swatch {
+  display: inline-flex;
+  width: 18px;
+  height: 4px;
+  border-radius: 999px;
+}
+
+.llmscope-app .attention-legend__swatch--arc {
+  background: linear-gradient(90deg, rgba(168, 85, 247, 0.42), rgba(139, 92, 246, 1));
+  box-shadow: 0 0 10px rgba(139, 92, 246, 0.26);
+}
+
+.llmscope-app .attention-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.llmscope-app .attention-source-list {
+  gap: 8px;
+}
+
+.llmscope-app .attention-source-row {
+  grid-template-columns: minmax(0, 1.4fr) auto;
+  align-items: center;
+  row-gap: 6px;
+}
+
+.llmscope-app .attention-source-row--active {
+  border-color: rgba(245, 158, 11, 0.34);
+  box-shadow:
+    0 0 0 1px rgba(245, 158, 11, 0.14),
+    0 10px 24px rgba(2, 6, 23, 0.18);
+}
+
+.llmscope-app .attention-source-row__meta {
+  grid-column: 1 / -1;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.llmscope-app .attention-source-row__bar {
+  grid-column: 1 / -1;
+  position: relative;
+  overflow: hidden;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.14);
+}
+
+.llmscope-app .attention-source-row__bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(167, 139, 250, 0.92), rgba(139, 92, 246, 0.72));
+  box-shadow: 0 0 14px rgba(139, 92, 246, 0.2);
 }
 
 .llmscope-app .sentence-bar--collapsed {
@@ -2173,12 +2520,30 @@ button {
   font-size: 11px;
 }
 
+.llmscope-app .generation-panel,
 .llmscope-app .explorer-dock,
 .llmscope-app .inspector-panel {
   top: 16px;
   gap: 10px;
   padding: 12px;
   border-radius: 20px;
+}
+
+.llmscope-app .generation-panel {
+  position: fixed;
+  left: 16px;
+  z-index: 34;
+  display: flex;
+  width: var(--dock-width);
+  max-height: calc(100vh - 32px);
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.llmscope-app .generation-panel--collapsed {
+  width: var(--dock-collapsed-width);
+  padding: 10px;
+  border-radius: 16px;
 }
 
 .llmscope-app .explorer-dock {
@@ -2204,8 +2569,45 @@ button {
   gap: 10px;
 }
 
+.llmscope-app .generation-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.llmscope-app .generation-panel__header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .llmscope-app .explorer-dock__header-actions {
   gap: 6px;
+}
+
+.llmscope-app .generation-panel__eyebrow {
+  margin: 0;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.llmscope-app .generation-panel__title {
+  margin: 6px 0 0;
+  font-family: var(--font-display), ui-sans-serif, sans-serif;
+  font-size: 22px;
+  line-height: 1.08;
+  letter-spacing: -0.05em;
+}
+
+.llmscope-app .generation-panel__subtitle {
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .llmscope-app .explorer-dock__title {
@@ -2220,6 +2622,325 @@ button {
 
 .llmscope-app .explorer-dock__subtitle {
   display: none;
+}
+
+.llmscope-app .generation-panel__body {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  padding-right: 2px;
+  scrollbar-width: thin;
+}
+
+.llmscope-app .generation-panel__body::-webkit-scrollbar {
+  width: 12px;
+}
+
+.llmscope-app .generation-panel__body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.llmscope-app .generation-panel__body::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.24);
+  background-clip: padding-box;
+}
+
+.llmscope-app .generation-panel__section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.08);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.028);
+}
+
+.llmscope-app .generation-panel__section--generate {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  background:
+    linear-gradient(180deg, rgba(7, 12, 24, 0.86), rgba(7, 12, 24, 0.96)),
+    rgba(255, 255, 255, 0.028);
+  box-shadow: 0 -10px 22px rgba(2, 6, 23, 0.2);
+}
+
+.llmscope-app .generation-panel__section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.llmscope-app .generation-panel__section-heading--summary,
+.llmscope-app .generation-panel__advanced > summary,
+.llmscope-app .generation-panel__examples > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.llmscope-app .generation-panel__section-heading--summary::-webkit-details-marker,
+.llmscope-app .generation-panel__advanced > summary::-webkit-details-marker,
+.llmscope-app .generation-panel__examples > summary::-webkit-details-marker {
+  display: none;
+}
+
+.llmscope-app .generation-panel__section-step {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.llmscope-app .generation-panel__section-helper,
+.llmscope-app .generation-panel__system-helper,
+.llmscope-app .generation-panel__status-copy,
+.llmscope-app .generation-panel__status-note p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.llmscope-app .generation-panel__section-pill,
+.llmscope-app .generation-panel__capability,
+.llmscope-app .generation-panel__status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.llmscope-app .generation-panel__inline-actions,
+.llmscope-app .generation-panel__badge-row,
+.llmscope-app .generation-panel__status-row,
+.llmscope-app .generation-panel__collapsed-actions,
+.llmscope-app .generation-panel__status-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.llmscope-app .generation-panel__collapsed-actions {
+  flex-direction: column;
+}
+
+.llmscope-app .generation-panel__mini-action,
+.llmscope-app .generation-panel__toggle,
+.llmscope-app .generation-panel__examples > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.llmscope-app .generation-panel__toggle--active {
+  background: rgba(56, 189, 248, 0.16);
+  color: var(--text-primary);
+}
+
+.llmscope-app .generation-panel__examples {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.llmscope-app .generation-panel__examples-menu {
+  display: grid;
+  gap: 6px;
+}
+
+.llmscope-app .generation-panel__example {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 9px;
+  border: 1px solid rgba(148, 163, 184, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.llmscope-app .generation-panel__example small {
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.llmscope-app .generation-panel__textarea,
+.llmscope-app .generation-panel__system-textarea {
+  width: 100%;
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  background: var(--field-background);
+  color: var(--text-primary);
+}
+
+.llmscope-app .generation-panel__textarea {
+  min-height: 156px;
+  padding: 12px 13px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.llmscope-app .generation-panel__system-textarea {
+  min-height: 94px;
+  padding: 10px 12px;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.llmscope-app .generation-panel__prompt-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.llmscope-app .generation-panel__system-card,
+.llmscope-app .generation-panel__status-card,
+.llmscope-app .generation-panel__status-note {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.022);
+}
+
+.llmscope-app .generation-panel__system-source {
+  color: #c4b5fd;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.llmscope-app .generation-panel__field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.llmscope-app .generation-panel__field-grid > .generation-panel__field:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+
+.llmscope-app .generation-panel__field,
+.llmscope-app .generation-panel__slider-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.llmscope-app .generation-panel__field span:first-child,
+.llmscope-app .generation-panel__slider-field > span:first-child {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.llmscope-app .generation-panel__slider-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 76px;
+  gap: 8px;
+  align-items: center;
+}
+
+.llmscope-app .generation-panel__slider-field small {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.llmscope-app .generation-panel__advanced {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.llmscope-app .generation-panel__status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.llmscope-app .generation-panel__status-grid dt {
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.llmscope-app .generation-panel__status-grid dd {
+  margin: 4px 0 0;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.llmscope-app .generation-panel__status-pill--online {
+  background: rgba(52, 211, 153, 0.12);
+  color: #9ae6b4;
+}
+
+.llmscope-app .generation-panel__status-pill--offline {
+  background: rgba(251, 113, 133, 0.12);
+  color: #fecdd3;
+}
+
+.llmscope-app .generation-panel__status-pill--checking {
+  background: rgba(251, 191, 36, 0.14);
+  color: #fde68a;
+}
+
+.llmscope-app .generation-panel__generate {
+  display: inline-flex;
+  min-height: 40px;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid rgba(56, 189, 248, 0.32);
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.96), rgba(14, 165, 233, 0.8));
+  color: #04101e;
+  font-size: 13px;
+  font-weight: 700;
+  box-shadow: 0 8px 20px rgba(14, 165, 233, 0.18);
+}
+
+.llmscope-app .generation-panel__generate:disabled {
+  opacity: 0.6;
 }
 
 .llmscope-app .explorer-dock__collapsed-actions {
@@ -2459,8 +3180,8 @@ button {
 }
 
 .llmscope-app .token-node--prompt {
-  width: 232px;
-  min-height: 96px;
+  width: 120px;
+  min-height: 72px;
 }
 
 .llmscope-app .token-node__body {
@@ -2475,8 +3196,8 @@ button {
 }
 
 .llmscope-app .token-node--prompt .token-node__title {
-  font-size: 14px;
-  line-height: 1.4;
+  font-size: 11px;
+  line-height: 1.28;
 }
 
 .llmscope-app .token-node__status-badge {
@@ -2560,6 +3281,10 @@ button {
     width: min(228px, calc(100vw - 32px));
   }
 
+  .llmscope-app .generation-panel {
+    width: min(228px, calc(100vw - 32px));
+  }
+
   .llmscope-app .inspector-panel {
     display: none;
   }
@@ -2567,6 +3292,10 @@ button {
   .llmscope-app .react-flow__minimap,
   .llmscope-app .react-flow__attribution {
     right: 16px;
+  }
+
+  .llmscope-app .reality-workspace__detail-grid--summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -2615,6 +3344,26 @@ button {
 
   .llmscope-app .explorer-dock--collapsed {
     width: auto;
+  }
+
+  .llmscope-app .generation-panel {
+    top: auto;
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+    width: auto;
+    max-height: 40vh;
+  }
+
+  .llmscope-app .generation-panel--collapsed {
+    width: auto;
+  }
+
+  .llmscope-app .generation-panel__field-grid,
+  .llmscope-app .generation-panel__status-grid,
+  .llmscope-app .reality-workspace__detail-grid,
+  .llmscope-app .reality-workspace__detail-grid--summary {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .llmscope-app .token-node__hover,

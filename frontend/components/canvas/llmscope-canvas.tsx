@@ -22,31 +22,67 @@ import {
   Camera,
   ChevronLeft,
   ChevronRight,
-  LoaderCircle,
   Pause,
   Play,
   Redo2,
-  RefreshCcw,
   Search,
-  Sparkles,
   Undo2,
 } from "lucide-react";
 
 import {
   CurrentRealityPanel,
+  type CurrentRealityAttentionTokenItem,
+  type CurrentRealityConversationSection,
+  type CurrentRealityFormattingSelection,
+  type CurrentRealityGroupedTokenItem,
   type CurrentRealityStats,
+  type CurrentRealitySummaryItem,
   type CurrentRealityTokenItem,
+  type CurrentRealityTokenGroup,
 } from "@/components/canvas/current-reality-panel";
+import {
+  GenerationPanel,
+  type GenerationPanelSystemPromptState,
+} from "@/components/canvas/generation-panel";
+import { AttentionEdge } from "@/components/canvas/attention-edge";
 import { ProbabilityEdge } from "@/components/canvas/probability-edge";
 import { TokenContextMenu } from "@/components/canvas/token-context-menu";
 import { TokenNode } from "@/components/canvas/token-node";
 import type {
+  AttentionFlowEdge,
+  CanvasFlowEdge,
   InspectorAlternative,
   ProbabilityFlowEdge,
   ProbabilityViewMode,
   TokenFlowNode,
   TokenNodeData,
 } from "@/components/canvas/types";
+import {
+  buildAttentionCacheKey,
+  buildDeterministicFocusViewport,
+  buildAttentionHeadLabel,
+  buildAttentionOverlayEdges,
+  buildAttentionRequestPayload,
+  buildAttentionStripTokens,
+  buildAttentionTokenId,
+  buildPromptTokenNodeId,
+  canUseAttentionLens,
+  canMutateGraphTokenNode,
+  isPromptTokenNodeId,
+  layoutPromptTokenLane,
+  summarizePromptDisplayNodes,
+} from "@/lib/attention-lens";
+import {
+  buildBranchBreadcrumb,
+  buildConversationSections,
+  buildCurrentRealityRawContext,
+  buildCurrentRealityTokenIdList,
+  buildFormattingSelectionSummary,
+  groupPromptTokens,
+  type RealityAssistantTokenItem,
+  type RealityPromptTokenItem,
+  type RealityTokenGroup,
+} from "@/lib/current-reality";
 import {
   applyExpansionToTokenGraph,
   buildContinuationValidation,
@@ -73,14 +109,18 @@ import {
 } from "@/lib/continuation-mode";
 import type {
   AlternativeCandidate,
+  CanonicalPromptToken,
+  CanonicalTokenSourceCategory,
   ContinueGenerationResponse,
   ContinuationMode,
   GenerationResponse,
+  HuggingFaceAttentionAnalysisMode,
+  HuggingFaceAttentionAggregationMode,
+  HuggingFaceAttentionResponse,
   HuggingFaceLocalStatusResponse,
   ModelCatalogResponse,
   ModelOption,
   NodeExpansionResponse,
-  PresetOption,
   ProviderCapabilitiesDetail,
   ProviderOption,
 } from "@/types/api";
@@ -110,7 +150,7 @@ const OLLAMA_PROVIDER_CAPABILITIES: ProviderCapabilitiesDetail = {
 const HUGGING_FACE_PROVIDER_CAPABILITIES: ProviderCapabilitiesDetail = {
   supports_logprobs: true,
   supports_entropy: true,
-  supports_attention: false,
+  supports_attention: true,
   supports_exact_continuation: true,
   supports_streaming: false,
   supports_branching: true,
@@ -210,13 +250,29 @@ const INITIAL_PROMPT = "What is a good time for a 16 year old kid in the 400m?";
 const INITIAL_TEMPERATURE = 0.7;
 const INITIAL_TOP_P = 1;
 const INITIAL_MAX_TOKENS = 256;
-const HORIZONTAL_GAP = 320;
+const HORIZONTAL_GAP = 170;
 const VERTICAL_GAP = 168;
 const MAX_BRANCH_CHILDREN = 4;
 const DEFAULT_PLAYBACK_SPEED = 1;
 const FRAME_BUDGET_MS = 16;
 const SHOULD_LOG_PERF = process.env.NODE_ENV !== "production";
 const SHOULD_LOG_CONTINUATION = process.env.NODE_ENV !== "production";
+const ATTENTION_LENS_TOOLTIP =
+  "Attention shows how this layer and head distributed internal focus across earlier tokens. It is a model signal, not proof of reasoning or causation.";
+const PROMPT_SECTION_GAP = 36;
+const EMPTY_PROMPT_TOKENS: CanonicalPromptToken[] = [];
+const PROMPT_NODE_WIDTH = 120;
+const PROMPT_NODE_HEIGHT = 72;
+const PROMPT_NODE_GAP = 10;
+const PROMPT_ROW_GAP = 14;
+const PROMPT_MAX_ROW_WIDTH = 1180;
+const PROMPT_OUTPUT_GAP = 28;
+const ATTENTION_FOCUS_PADDING = 0.08;
+const ATTENTION_FOCUS_MIN_ZOOM = 0.6;
+const ATTENTION_FOCUS_MAX_ZOOM = 1.15;
+const ATTENTION_FOCUS_DURATION_MS = 360;
+const PROMPT_MAX_DISTANCE_FROM_OUTPUT = 2200;
+const ATTENTION_FOCUS_OCCLUSION_MARGIN = 168;
 
 type BackendState = "checking" | "online" | "offline";
 type SurfaceTheme = "midnight" | "graphite";
@@ -274,6 +330,7 @@ const nodeTypes = {
 };
 
 const edgeTypes = {
+  attentionEdge: AttentionEdge,
   probabilityEdge: ProbabilityEdge,
 };
 
@@ -308,6 +365,21 @@ function wait(durationMs: number) {
   });
 }
 
+function waitForAnimationFrames(frameCount = 2) {
+  return new Promise<void>((resolve) => {
+    const step = (remaining: number) => {
+      if (remaining <= 0) {
+        resolve();
+        return;
+      }
+
+      window.requestAnimationFrame(() => step(remaining - 1));
+    };
+
+    step(frameCount);
+  });
+}
+
 function formatPercent(value: number) {
   return `${(value * 100).toFixed(1)}%`;
 }
@@ -326,14 +398,6 @@ function formatNumber(value: number | null | undefined) {
   }
 
   return value.toFixed(4);
-}
-
-function formatVram(value: number | null | undefined) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return "Unavailable";
-  }
-
-  return `${value.toFixed(1)} GB`;
 }
 
 function formatSignedPercent(value: number) {
@@ -505,7 +569,15 @@ function getDisplayLabelForTokenMode(
   mode: TokenDisplayMode,
 ) {
   if (node.kind === "prompt") {
-    return node.displayTokenText;
+    if (mode === "raw") {
+      return node.tokenText || node.displayTokenText;
+    }
+
+    if (mode === "token_id") {
+      return node.tokenId !== null ? `#${node.tokenId}` : node.displayTokenText;
+    }
+
+    return node.displayTokenText || node.decodedContribution || node.tokenText;
   }
 
   if (mode === "raw") {
@@ -517,6 +589,135 @@ function getDisplayLabelForTokenMode(
   }
 
   return node.displayTokenText || node.decodedContribution || node.tokenText;
+}
+
+function getPromptCategoryLabel(sourceCategory: CanonicalTokenSourceCategory) {
+  switch (sourceCategory) {
+    case "system":
+      return "System";
+    case "user_prompt":
+      return "User prompt";
+    case "assistant_prefix":
+      return "Assistant prefix";
+    case "template":
+      return "Template / control";
+    default:
+      return "Generated output";
+  }
+}
+
+function buildPromptTokenNode(
+  promptToken: CanonicalPromptToken,
+  options: {
+    isDimmed: boolean;
+    isPinned: boolean;
+    isSelected: boolean;
+    position: { x: number; y: number };
+    providerCapabilities: ProviderCapabilitiesDetail;
+    tokenDisplayMode: TokenDisplayMode;
+  },
+): TokenFlowNode {
+  const metrics = getNodeMetrics(promptToken.raw_token, promptToken.token_bytes);
+  const nodeData: TokenNodeData = {
+    kind: "prompt",
+    generationId: `prompt:${promptToken.full_position}`,
+    predictionId: buildPromptTokenNodeId(promptToken.full_position),
+    segmentId: null,
+    continuationMode: "exact",
+    tokenIndex: promptToken.full_position,
+    branchId: "root",
+    tokenText: promptToken.raw_token,
+    displayTokenText: promptToken.display_token,
+    decodedContribution: promptToken.decoded_contribution,
+    cumulativeDecodedText: "",
+    cumulativeRawText: "",
+    cumulativeTokenIds: null,
+    cumulativeLogProbability: 0,
+    tokenBytes: metrics.tokenBytes,
+    utf8Length: metrics.utf8Length,
+    characterLength: metrics.characterLength,
+    leadingWhitespaceCount: metrics.leadingWhitespaceCount,
+    trailingWhitespaceCount: metrics.trailingWhitespaceCount,
+    probability: 1,
+    rawProbability: 1,
+    normalizedDisplayedProbability: 1,
+    displayProbability: 1,
+    probabilityCoverage: 1,
+    remainingProbabilityMass: 0,
+    probabilityMode: "raw",
+    logProbability: 0,
+    entropy: 0,
+    latency: 0,
+    tokenId: promptToken.token_id,
+    tokenizerId: promptToken.token_id,
+    generationStep: promptToken.full_position,
+    textPreview: promptToken.decoded_contribution,
+    contextBefore: "",
+    contextAfter: "",
+    cumulativeProbability: 1,
+    branchProbability: 1,
+    depth: 0,
+    rank: 0,
+    finishReason: null,
+    parentId: null,
+    isMainPath: false,
+    isCollapsed: false,
+    alternativesExpanded: false,
+    distributionRequested: false,
+    childCount: 0,
+    status: "ready",
+    requestPrompt: "",
+    requestModel: "",
+    requestPreset: "",
+    requestTemperature: 0,
+    requestTopP: 1,
+    requestVariation: 0,
+    requestDemoMode: false,
+    responseMode: "prompt",
+    sourceNotes: "",
+    reasoningIntent: "",
+    reasoningStrategy: "",
+    reasoningFocusTerms: [],
+    branchRationale: null,
+    metadata: {
+      prompt_position: promptToken.full_position,
+      provider: "hugging_face",
+    },
+    sourceCategory: promptToken.source_category,
+    sourceLabel: promptToken.source_label || getPromptCategoryLabel(promptToken.source_category),
+    specialToken: promptToken.special_token,
+    providerCapabilities: options.providerCapabilities,
+    rawLogits: null,
+    topAlternatives: [],
+    sourceAlternatives: [],
+    distributionMessage: null,
+    isSearchMatch: false,
+    isSearchFocused: false,
+    isDimmed: options.isDimmed,
+    isActiveReality: options.isSelected,
+    isPinned: options.isPinned,
+  };
+
+  nodeData.displayTokenText = getDisplayLabelForTokenMode(nodeData, options.tokenDisplayMode);
+
+  return {
+    id: buildPromptTokenNodeId(promptToken.full_position),
+    type: "tokenCard",
+    position: options.position,
+    style: {
+      height: PROMPT_NODE_HEIGHT,
+      width: PROMPT_NODE_WIDTH,
+    },
+    width: PROMPT_NODE_WIDTH,
+    height: PROMPT_NODE_HEIGHT,
+    data: nodeData,
+    draggable: false,
+    selectable: true,
+  };
+}
+
+function isPromptTokenDisplayNode(node: TokenFlowNode | null | undefined) {
+  return Boolean(node && node.data.kind === "prompt" && node.id !== "root");
 }
 
 function findProviderOption(providers: ProviderOption[], providerId: string): ProviderOption {
@@ -534,15 +735,6 @@ function findProviderOption(providers: ProviderOption[], providerId: string): Pr
       status: "ready",
       recommended_models: [],
       capabilities: fallbackCapabilities,
-    }
-  );
-}
-
-function findPresetOption(presets: PresetOption[], presetId: string): PresetOption {
-  return (
-    presets.find((item) => item.id === presetId) ?? {
-      id: presetId,
-      label: presetId,
     }
   );
 }
@@ -688,6 +880,9 @@ function applyTokenGraphRecordToFlowNode(
       requestDemoMode: record.requestDemoMode,
       responseMode: record.responseMode,
       sourceNotes: record.sourceNotes,
+      sourceCategory: "generated_output",
+      sourceLabel: "Generated output",
+      specialToken: false,
       providerCapabilities: record.providerCapabilities,
       reasoningIntent: record.reasoningIntent,
       reasoningStrategy: record.reasoningStrategy,
@@ -803,6 +998,9 @@ function buildPromptNode({
       requestDemoMode: demoMode,
       responseMode,
       sourceNotes: reasoning.notes,
+      sourceCategory: "template",
+      sourceLabel: "Prompt summary",
+      specialToken: false,
       providerCapabilities,
       reasoningIntent: reasoning.intent,
       reasoningStrategy: reasoning.strategy,
@@ -987,6 +1185,9 @@ function buildTokenNode({
       requestDemoMode: demoMode,
       responseMode,
       sourceNotes: reasoning.notes,
+      sourceCategory: "generated_output",
+      sourceLabel: "Generated output",
+      specialToken: false,
       providerCapabilities,
       reasoningIntent: reasoning.intent,
       reasoningStrategy: reasoning.strategy,
@@ -1893,9 +2094,10 @@ function getBranchSummaries(nodes: TokenFlowNode[], edges: ProbabilityFlowEdge[]
 void getBranchSummaries;
 
 function getNodeFrame(node: TokenFlowNode) {
+  const isPromptToken = node.data.kind === "prompt" && node.id !== "root";
   return {
-    height: node.data.kind === "prompt" ? 124 : 112,
-    width: node.data.kind === "prompt" ? 292 : 208,
+    height: node.data.kind === "prompt" ? (isPromptToken ? 94 : 124) : 112,
+    width: node.data.kind === "prompt" ? (isPromptToken ? 188 : 292) : 208,
   };
 }
 
@@ -2073,7 +2275,22 @@ function Workspace() {
   const [continuationPreview, setContinuationPreview] = useState<ContinuationPreviewState | null>(null);
   const [huggingFaceLocalStatus, setHuggingFaceLocalStatus] =
     useState<HuggingFaceLocalStatusResponse | null>(null);
-  const flowRef = useRef<ReactFlowInstance<TokenFlowNode, ProbabilityFlowEdge> | null>(null);
+  const [attentionLensEnabled, setAttentionLensEnabled] = useState(false);
+  const [attentionAnalysisMode, setAttentionAnalysisMode] =
+    useState<HuggingFaceAttentionAnalysisMode>("prediction");
+  const [attentionLayer, setAttentionLayer] = useState<number | null>(null);
+  const [attentionAggregationMode, setAttentionAggregationMode] =
+    useState<HuggingFaceAttentionAggregationMode>("average_heads");
+  const [attentionAdvancedOpen, setAttentionAdvancedOpen] = useState(false);
+  const [attentionHeadIndex, setAttentionHeadIndex] = useState(0);
+  const [attentionTopN, setAttentionTopN] = useState(8);
+  const [showAllAttentionTokens, setShowAllAttentionTokens] = useState(false);
+  const [showPromptTokens, setShowPromptTokens] = useState(false);
+  const [attentionAnalysis, setAttentionAnalysis] = useState<HuggingFaceAttentionResponse | null>(null);
+  const [attentionError, setAttentionError] = useState<string | null>(null);
+  const [attentionLoading, setAttentionLoading] = useState(false);
+  const [pinnedAttentionSourceIds, setPinnedAttentionSourceIds] = useState<string[]>([]);
+  const flowRef = useRef<ReactFlowInstance<TokenFlowNode, CanvasFlowEdge> | null>(null);
   const nodesRef = useRef<TokenFlowNode[]>([]);
   const edgesRef = useRef<ProbabilityFlowEdge[]>([]);
   const tokenGraphRef = useRef<TokenGraphState>(createEmptyTokenGraph());
@@ -2098,6 +2315,11 @@ function Workspace() {
     (nodeId: string, options?: { pushHistory?: boolean }) => Promise<boolean>
   >(async () => false);
   const collapseSubtreeRef = useRef<(nodeId: string) => void>(() => undefined);
+  const attentionAbortRef = useRef<AbortController | null>(null);
+  const attentionCacheRef = useRef<Map<string, HuggingFaceAttentionResponse>>(new Map());
+  const attentionViewportRef = useRef<{ x: number; y: number; zoom: number } | null>(null);
+  const previousPromptTokensVisibleRef = useRef(false);
+  const lastLoggedAttentionAnalysisRef = useRef<HuggingFaceAttentionResponse | null>(null);
   const isGraphInteractingRef = useRef(false);
   const dragPerformanceRef = useRef<DragPerformanceStats>({
     sampleCount: 0,
@@ -2128,6 +2350,14 @@ function Workspace() {
   const selectedProviderStatusMessage = selectedProviderOption.status_message ?? null;
   const selectedProviderRecommendations = selectedProviderOption.recommended_models ?? [];
   const selectedProviderReady = selectedProviderOption.status === "ready";
+  const generationContextMessages = useMemo(
+    () => generation?.context_messages ?? [],
+    [generation?.context_messages],
+  );
+  const activeSystemContextMessage =
+    generation && generationProviderId === selectedProvider
+      ? generationContextMessages.find((message) => message.role === "system") ?? null
+      : null;
   const selectedHuggingFaceModelStatus =
     huggingFaceLocalStatus?.models.find((entry) => entry.id === model) ?? null;
   const selectedHuggingFaceStatusMessage =
@@ -2143,6 +2373,58 @@ function Workspace() {
     (selectedProviderReady &&
       filteredModels.length > 0 &&
       (!isHuggingFaceProvider || huggingFaceModelLoaded));
+  const systemPromptState = useMemo<GenerationPanelSystemPromptState>(() => {
+    if (activeSystemContextMessage) {
+      return {
+        content: activeSystemContextMessage.content,
+        editable: generation?.system_prompt_editable ?? false,
+        helper:
+          activeSystemContextMessage.source === "provider_default"
+            ? "This model injects a provider-default system message through its chat template."
+            : "These instructions were composed by the backend for the last generation.",
+        sourceLabel:
+          activeSystemContextMessage.source === "provider_default"
+            ? "Provider default"
+            : "Backend-composed",
+        title: "The exact system instructions used for the current graph.",
+      };
+    }
+
+    if (selectedProvider === "openai") {
+      return {
+        content: null,
+        editable: false,
+        helper:
+          "OpenAI instructions are composed on the backend from the selected preset and detected intent. Generate once to inspect the exact prompt stack.",
+        sourceLabel: "Composed at request time",
+        title: "The exact instructions appear after a generation finishes.",
+      };
+    }
+
+    if (selectedProvider === "hugging_face") {
+      return {
+        content: null,
+        editable: false,
+        helper:
+          "Hugging Face Local uses the model's chat template. Generate once to inspect the exact system message and formatting tokens returned by the tokenizer.",
+        sourceLabel: "Model chat template",
+        title: "The exact template context appears after a generation finishes.",
+      };
+    }
+
+    return {
+      content: null,
+      editable: false,
+      helper:
+        "This provider does not currently expose a separate system prompt in the saved generation context.",
+      sourceLabel: "Provider managed",
+      title: "A separate system message is not available for this provider.",
+    };
+  }, [
+    activeSystemContextMessage,
+    generation?.system_prompt_editable,
+    selectedProvider,
+  ]);
   const activePathIds = useMemo(
     () => buildActivePathIds(branchChoices, graphNodes),
     [branchChoices, graphNodes],
@@ -2185,57 +2467,513 @@ function Workspace() {
     () => buildNodeProbabilityView(graphNodes, probabilityViewMode),
     [graphNodes, probabilityViewMode],
   );
-
-  const displayNodes = useMemo(
+  const generationPromptTokens = generation?.prompt_tokens ?? EMPTY_PROMPT_TOKENS;
+  const promptTokensAvailable =
+    generationProviderId === "hugging_face" && generationPromptTokens.length > 0;
+  const promptNodeIdByPosition = useMemo(
     () =>
-      graphNodes.map((node) => ({
-        ...node,
-        data: {
-          ...node.data,
-          displayTokenText: getDisplayLabelForTokenMode(node.data, tokenDisplayMode),
-          displayProbability:
-            nodeProbabilityView.get(node.id)?.displayProbability ?? node.data.displayProbability,
-          probabilityCoverage:
-            nodeProbabilityView.get(node.id)?.probabilityCoverage ??
-            node.data.probabilityCoverage,
-          remainingProbabilityMass:
-            nodeProbabilityView.get(node.id)?.remainingProbabilityMass ??
-            node.data.remainingProbabilityMass,
-          probabilityMode: probabilityViewMode,
-          isSearchMatch: searchMatches.some((match) => match.id === node.id),
-          isSearchFocused: focusedSearchNodeId === node.id,
-          isDimmed: hoveredRelatedIdSet ? !hoveredRelatedIdSet.has(node.id) : false,
-          isActiveReality: activePathIdSet.has(node.id),
-          isPinned: pinnedSet.has(node.id),
-        },
-      })),
+      new Map<number, string>(
+        generationPromptTokens.map((promptToken) => [
+          promptToken.full_position,
+          buildPromptTokenNodeId(promptToken.full_position),
+        ]),
+      ),
+    [generationPromptTokens],
+  );
+  const selectedPromptTokenNodeId = isPromptTokenNodeId(selectedNodeId) ? selectedNodeId : null;
+  const graphNodeMap = useMemo(
+    () => new Map<string, TokenFlowNode>(graphNodes.map((node) => [node.id, node])),
+    [graphNodes],
+  );
+  const activeLeafNodeId = activePathIds[activePathIds.length - 1] ?? null;
+  const selectedGraphNode =
+    selectedPromptTokenNodeId
+      ? null
+      : (selectedNodeId ? graphNodeMap.get(selectedNodeId) ?? null : null) ??
+        (activeLeafNodeId ? graphNodeMap.get(activeLeafNodeId) ?? null : null) ??
+        null;
+  const selectedRecord =
+    selectedPromptTokenNodeId
+      ? null
+      : (selectedNodeId ? tokenGraph.nodesById[selectedNodeId] ?? null : null) ??
+        (activeLeafNodeId ? tokenGraph.nodesById[activeLeafNodeId] ?? null : null);
+  const attentionValidation = useMemo(
+    () =>
+      selectedGraphNode?.id && canUseAttentionLens(selectedGraphNode)
+        ? buildContinuationValidation(tokenGraph, selectedGraphNode.id)
+        : null,
+    [selectedGraphNode, tokenGraph],
+  );
+  const attentionAvailable = useMemo(
+    () =>
+      Boolean(
+        selectedGraphNode &&
+          canUseAttentionLens(selectedGraphNode) &&
+          attentionValidation?.validationMode === "token_ids" &&
+          attentionValidation.promptTokenIds &&
+          promptTokensAvailable &&
+          attentionValidation.generatedPrefixTokenIds &&
+          attentionValidation.generatedPrefixTokenIds.length > 0,
+      ),
+    [attentionValidation, promptTokensAvailable, selectedGraphNode],
+  );
+  const attentionDefaultLayer = useMemo(
+    () => Math.max((huggingFaceLocalStatus?.active_model_num_hidden_layers ?? 1) - 1, 0),
+    [huggingFaceLocalStatus?.active_model_num_hidden_layers],
+  );
+  const effectiveAttentionLayer = attentionLayer ?? attentionDefaultLayer;
+  const effectiveAttentionHead = attentionAggregationMode === "single_head" ? attentionHeadIndex : null;
+  const canShowAllAttentionTokens = useMemo(
+    () => (attentionAnalysis?.analyzed_context_length ?? 0) <= 40,
+    [attentionAnalysis?.analyzed_context_length],
+  );
+  const attentionMaxConnections = useMemo(
+    () =>
+      showAllAttentionTokens && canShowAllAttentionTokens && attentionAnalysis
+        ? Math.max(attentionAnalysis.analyzed_context_length - 1, 1)
+        : attentionTopN,
+    [
+      attentionAnalysis,
+      attentionTopN,
+      canShowAllAttentionTokens,
+      showAllAttentionTokens,
+    ],
+  );
+  const attentionRequest = useMemo(() => {
+    if (
+      !attentionLensEnabled ||
+      !attentionAvailable ||
+      !selectedGraphNode ||
+      !attentionValidation?.promptTokenIds ||
+      !attentionValidation.generatedPrefixTokenIds ||
+      generationPromptTokens.length === 0
+    ) {
+      return null;
+    }
+
+    const request = buildAttentionRequestPayload({
+      allowTruncatedRecompute: false,
+      analysisMode: attentionAnalysisMode,
+      aggregationMode: attentionAggregationMode,
+      generatedTokenIds: attentionValidation.generatedPrefixTokenIds,
+      maxConnections: attentionMaxConnections,
+      maxContextTokens: 256,
+      modelId: selectedGraphNode.data.requestModel,
+      modelRevision: attentionValidation.modelRevision,
+      promptTokenIds: attentionValidation.promptTokenIds,
+      promptTokens: generationPromptTokens,
+      selectedHead: effectiveAttentionHead,
+      selectedLayer: effectiveAttentionLayer,
+      tokenizerIdentity: attentionValidation.tokenizerIdentity,
+      tokenizerRevision: attentionValidation.tokenizerRevision,
+    });
+
+    return {
+      cacheKey: buildAttentionCacheKey(request),
+      request,
+    };
+  }, [
+    attentionAnalysisMode,
+    attentionAggregationMode,
+    attentionAvailable,
+    attentionLensEnabled,
+    attentionMaxConnections,
+    attentionValidation,
+    effectiveAttentionHead,
+    effectiveAttentionLayer,
+    generationPromptTokens,
+    selectedGraphNode,
+  ]);
+  const promptTokensVisible = promptTokensAvailable && showPromptTokens;
+  const promptTokensUnavailableReason = promptTokensAvailable
+    ? null
+    : "Canonical prompt-token metadata is unavailable for this graph.";
+  const attentionHeadLabel = useMemo(
+    () => buildAttentionHeadLabel(attentionAggregationMode, effectiveAttentionHead),
+    [attentionAggregationMode, effectiveAttentionHead],
+  );
+  const attentionHeadCount = attentionAnalysis?.num_query_heads ??
+    huggingFaceLocalStatus?.active_model_num_attention_heads ??
+    0;
+  const attentionLayerCount = attentionAnalysis?.num_layers ??
+    huggingFaceLocalStatus?.active_model_num_hidden_layers ??
+    0;
+  const inspectorAlternativeView = useMemo(
+    () =>
+      buildInspectorAlternatives(
+        tokenGraph,
+        selectedGraphNode?.id ?? activeLeafNodeId,
+        probabilityViewMode,
+      ),
+    [activeLeafNodeId, probabilityViewMode, selectedGraphNode?.id, tokenGraph],
+  );
+  const inspectorAlternatives = inspectorAlternativeView.items;
+  const inspectorCoverage = inspectorAlternativeView.coverage;
+  const inspectorRemainingProbabilityMass =
+    inspectorAlternativeView.remainingProbabilityMass;
+  const changedTokenIndexSet = useMemo(
+    () => new Set(changedTokenIndexes),
+    [changedTokenIndexes],
+  );
+  const pinnedAttentionSourceIdSet = useMemo(
+    () => new Set<string>(pinnedAttentionSourceIds),
+    [pinnedAttentionSourceIds],
+  );
+  const attentionOverlayEdges = useMemo<AttentionFlowEdge[]>(
+    () =>
+      attentionLensEnabled &&
+      selectedGraphNode &&
+      attentionAnalysis &&
+      attentionValidation
+        ? buildAttentionOverlayEdges({
+            analysis: attentionAnalysis,
+            lineageNodeIds: attentionValidation.lineageNodeIds,
+            pinnedSourceTokenIds: pinnedAttentionSourceIdSet,
+            promptNodeIdByPosition: promptTokensVisible ? promptNodeIdByPosition : undefined,
+            selectedNodeId: selectedGraphNode.id,
+          })
+        : [],
+    [
+      attentionAnalysis,
+      attentionLensEnabled,
+      attentionValidation,
+      pinnedAttentionSourceIdSet,
+      promptNodeIdByPosition,
+      promptTokensVisible,
+      selectedGraphNode,
+    ],
+  );
+  const attentionRelatedNodeIdSet = useMemo<Set<string> | null>(() => {
+    if (!attentionLensEnabled || !selectedGraphNode || !attentionAnalysis || !attentionValidation) {
+      return null;
+    }
+
+    const related = new Set<string>([selectedGraphNode.id]);
+    for (const source of attentionAnalysis.sources) {
+      if (source.sequence_scope === "generated") {
+        const graphNodeId =
+          attentionValidation.lineageNodeIds[(source.generated_token_index ?? -1) + 1] ?? null;
+        if (graphNodeId) {
+          related.add(graphNodeId);
+        }
+      } else {
+        related.add(
+          promptTokensVisible
+            ? (promptNodeIdByPosition.get(source.full_position) ?? "root")
+            : "root",
+        );
+      }
+    }
+
+    return related;
+  }, [
+    attentionAnalysis,
+    attentionLensEnabled,
+    attentionValidation,
+    promptNodeIdByPosition,
+    promptTokensVisible,
+    selectedGraphNode,
+  ]);
+  const attentionMassBreakdown = useMemo(
+    () => {
+      const breakdown = {
+        assistantPrefix: 0,
+        generatedOutput: 0,
+        prompt: 0,
+        system: 0,
+        template: 0,
+        userPrompt: 0,
+      };
+
+      if (!attentionAnalysis) {
+        return breakdown;
+      }
+
+      for (const token of attentionAnalysis.analyzed_tokens) {
+        const weight = typeof token.attention_weight === "number" ? token.attention_weight : 0;
+
+        if (token.sequence_scope === "prompt") {
+          breakdown.prompt += weight;
+        } else {
+          breakdown.generatedOutput += weight;
+        }
+
+        switch (token.source_category) {
+          case "assistant_prefix":
+            breakdown.assistantPrefix += weight;
+            break;
+          case "system":
+            breakdown.system += weight;
+            break;
+          case "template":
+            breakdown.template += weight;
+            break;
+          case "user_prompt":
+            breakdown.userPrompt += weight;
+            break;
+          default:
+            break;
+        }
+      }
+
+      return breakdown;
+    },
+    [attentionAnalysis],
+  );
+  const displayGraphNodes = useMemo<TokenFlowNode[]>(
+    () =>
+      graphNodes.map((node) => {
+        const isRootSummary = node.id === "root" && promptTokensAvailable;
+        const promptSummaryLabel =
+          isRootSummary && !promptTokensVisible && attentionMassBreakdown.prompt > 0
+            ? `Prompt summary · ${formatPercent(attentionMassBreakdown.prompt)}`
+            : node.data.sourceLabel;
+
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            displayTokenText:
+              isRootSummary ? "Prompt summary" : getDisplayLabelForTokenMode(node.data, tokenDisplayMode),
+            displayProbability:
+              nodeProbabilityView.get(node.id)?.displayProbability ?? node.data.displayProbability,
+            probabilityCoverage:
+              nodeProbabilityView.get(node.id)?.probabilityCoverage ??
+              node.data.probabilityCoverage,
+            remainingProbabilityMass:
+              nodeProbabilityView.get(node.id)?.remainingProbabilityMass ??
+              node.data.remainingProbabilityMass,
+            probabilityMode: probabilityViewMode,
+            sourceLabel: promptSummaryLabel,
+            isSearchMatch: searchMatches.some((match) => match.id === node.id),
+            isSearchFocused: focusedSearchNodeId === node.id,
+            isDimmed:
+              (hoveredRelatedIdSet ? !hoveredRelatedIdSet.has(node.id) : false) ||
+              (attentionRelatedNodeIdSet ? !attentionRelatedNodeIdSet.has(node.id) : false),
+            isActiveReality: activePathIdSet.has(node.id),
+            isPinned: pinnedSet.has(node.id),
+          },
+        };
+      }),
     [
       activePathIdSet,
+      attentionMassBreakdown.prompt,
+      attentionRelatedNodeIdSet,
       focusedSearchNodeId,
       graphNodes,
       hoveredRelatedIdSet,
       nodeProbabilityView,
       pinnedSet,
       probabilityViewMode,
+      promptTokensAvailable,
+      promptTokensVisible,
       searchMatches,
       tokenDisplayMode,
     ],
   );
-  const displayNodeMap = useMemo(
-    () => new Map(displayNodes.map((node) => [node.id, node])),
+  const attentionFocusedGraphNodes = useMemo<TokenFlowNode[]>(
+    () =>
+      attentionLensEnabled
+        ? displayGraphNodes.filter((node) => {
+            if (node.id === "root" || node.data.kind !== "token") {
+              return true;
+            }
+
+            return activePathIdSet.has(node.id);
+          })
+        : displayGraphNodes,
+    [activePathIdSet, attentionLensEnabled, displayGraphNodes],
+  );
+  const promptDisplayNodes = useMemo<TokenFlowNode[]>(() => {
+    if (!promptTokensVisible || generationPromptTokens.length === 0) {
+      return [];
+    }
+
+    const rootNode = displayGraphNodes.find((node) => node.id === "root") ?? null;
+    const promptAnchorNode =
+      displayGraphNodes
+        .filter(
+          (node) =>
+            node.id !== "root" &&
+            !node.hidden &&
+            node.data.kind === "token" &&
+            node.data.parentId === "root",
+        )
+        .sort(
+          (left, right) =>
+            left.position.x - right.position.x || left.position.y - right.position.y,
+        )[0] ??
+      displayGraphNodes
+        .filter((node) => node.id !== "root" && !node.hidden && node.data.kind === "token")
+        .sort(
+          (left, right) =>
+            left.position.x - right.position.x || left.position.y - right.position.y,
+        )[0] ??
+      null;
+
+    if (!rootNode || !promptAnchorNode) {
+      return [];
+    }
+
+    const anchorFrame = getNodeFrame(promptAnchorNode);
+    const rawPromptPlacements = layoutPromptTokenLane({
+      laneAnchorHeight: anchorFrame.height,
+      laneAnchorX: promptAnchorNode.position.x - PROMPT_OUTPUT_GAP,
+      laneAnchorY: promptAnchorNode.position.y + (anchorFrame.height - PROMPT_NODE_HEIGHT) / 2,
+      maxRowWidth: PROMPT_MAX_ROW_WIDTH,
+      nodeGap: PROMPT_NODE_GAP,
+      rowGap: PROMPT_ROW_GAP,
+      sectionGap: PROMPT_SECTION_GAP,
+      tokens: generationPromptTokens.map((promptToken) => ({
+        fullPosition: promptToken.full_position,
+        height: PROMPT_NODE_HEIGHT,
+        sourceCategory: promptToken.source_category,
+        width: PROMPT_NODE_WIDTH,
+      })),
+    });
+    const maxRowIndex = Math.max(...rawPromptPlacements.map((placement) => placement.row), 0);
+    const verticalCenterShift =
+      (maxRowIndex * (PROMPT_NODE_HEIGHT + PROMPT_ROW_GAP)) / 2;
+    const promptPlacements = rawPromptPlacements.map((placement) => ({
+      ...placement,
+      y: placement.y + verticalCenterShift,
+    }));
+    const promptPlacementByPosition = new Map(
+      promptPlacements.map((placement) => [placement.fullPosition, placement]),
+    );
+    const nextNodes: TokenFlowNode[] = [];
+
+    for (const promptToken of generationPromptTokens) {
+      const nodeId = buildPromptTokenNodeId(promptToken.full_position);
+      const promptPlacement = promptPlacementByPosition.get(promptToken.full_position);
+
+      if (!promptPlacement) {
+        continue;
+      }
+
+      const nextNode = buildPromptTokenNode(promptToken, {
+        isDimmed:
+          (hoveredRelatedIdSet ? !hoveredRelatedIdSet.has(nodeId) : false) ||
+          (attentionRelatedNodeIdSet ? !attentionRelatedNodeIdSet.has(nodeId) : false),
+        isPinned: pinnedSet.has(nodeId),
+        isSelected: selectedNodeId === nodeId,
+        position: { x: promptPlacement.x, y: promptPlacement.y },
+        providerCapabilities: rootNode.data.providerCapabilities,
+        tokenDisplayMode,
+      });
+
+      nextNodes.push({
+        ...nextNode,
+        data: {
+          ...nextNode.data,
+          requestPrompt: rootNode.data.requestPrompt,
+          requestModel: rootNode.data.requestModel,
+          requestPreset: rootNode.data.requestPreset,
+          requestTemperature: rootNode.data.requestTemperature,
+          requestTopP: rootNode.data.requestTopP,
+          requestVariation: rootNode.data.requestVariation,
+          requestDemoMode: rootNode.data.requestDemoMode,
+          metadata: {
+            ...nextNode.data.metadata,
+            provider: rootNode.data.metadata.provider ?? "hugging_face",
+          },
+        },
+      });
+    }
+
+    if (process.env.NODE_ENV !== "production") {
+      for (const node of nextNodes) {
+        const deltaX = node.position.x - promptAnchorNode.position.x;
+        const deltaY = node.position.y - promptAnchorNode.position.y;
+        const distance = Math.hypot(deltaX, deltaY);
+
+        if (
+          !Number.isFinite(node.position.x) ||
+          !Number.isFinite(node.position.y) ||
+          distance > PROMPT_MAX_DISTANCE_FROM_OUTPUT
+        ) {
+          console.warn("[llmscope-attention] prompt-node-layout-outlier", {
+            anchorNodeId: promptAnchorNode.id,
+            nodeId: node.id,
+            position: node.position,
+            distance,
+          });
+        }
+      }
+    }
+
+    return nextNodes;
+  }, [
+    attentionRelatedNodeIdSet,
+    displayGraphNodes,
+    generationPromptTokens,
+    hoveredRelatedIdSet,
+    pinnedSet,
+    promptTokensVisible,
+    selectedNodeId,
+    tokenDisplayMode,
+  ]);
+  const displayNodes = useMemo<TokenFlowNode[]>(
+    () => [
+      ...promptDisplayNodes,
+      ...attentionFocusedGraphNodes.filter(
+        (node) => !(promptTokensVisible && node.id === "root"),
+      ),
+    ],
+    [attentionFocusedGraphNodes, promptDisplayNodes, promptTokensVisible],
+  );
+  const promptDisplaySummary = useMemo(
+    () => summarizePromptDisplayNodes(displayNodes),
     [displayNodes],
   );
+  const displayNodeMap = useMemo(
+    () => new Map<string, TokenFlowNode>(displayNodes.map((node) => [node.id, node])),
+    [displayNodes],
+  );
+  const selectedNode =
+    (selectedNodeId ? displayNodeMap.get(selectedNodeId) ?? null : null) ??
+    (selectedGraphNode ? displayNodeMap.get(selectedGraphNode.id) ?? null : null) ??
+    null;
+  const selectedProviderIdForInspector =
+    readMetadataString(selectedNode?.data.metadata ?? null, "provider") ??
+    generation?.request.provider ??
+    selectedProvider;
+  const selectedProviderLabelForInspector = findProviderOption(
+    providers,
+    selectedProviderIdForInspector,
+  ).label;
   const displayEdges: ProbabilityFlowEdge[] = useMemo(
-    () =>
-      graphEdges.map((edge) => {
-        const sourceNode = displayNodeMap.get(edge.source);
-        const targetNode = displayNodeMap.get(edge.target);
+    () => {
+      const promptOutputAnchorId =
+        promptTokensVisible && promptDisplayNodes.length > 0
+          ? promptDisplayNodes[promptDisplayNodes.length - 1]?.id ?? "root"
+          : "root";
+
+      return graphEdges.flatMap((edge) => {
+        const remappedSource = edge.source === "root" ? promptOutputAnchorId : edge.source;
+        const remappedTarget =
+          edge.target === "root" && promptTokensVisible && promptDisplayNodes.length > 0
+            ? promptDisplayNodes[0]?.id ?? "root"
+            : edge.target;
+        const sourceNode = displayNodeMap.get(remappedSource);
+        const targetNode = displayNodeMap.get(remappedTarget);
+
+        if (!sourceNode || !targetNode) {
+          return [];
+        }
+
         const sourceDimmed = sourceNode?.data.isDimmed ?? false;
         const targetDimmed = targetNode?.data.isDimmed ?? false;
         const edgeData = ensureProbabilityEdgeData(edge.data);
 
-        return {
+        return [{
           ...edge,
+          id:
+            remappedSource === edge.source && remappedTarget === edge.target
+              ? edge.id
+              : `${edge.id}:display`,
+          source: remappedSource,
+          target: remappedTarget,
           data: {
             ...edgeData,
             probability: targetNode?.data.displayProbability ?? edgeData.probability,
@@ -2254,45 +2992,172 @@ function Workspace() {
             isDimmed: sourceDimmed || targetDimmed,
             isFocused: hoveredNodeId
               ? activeEdgeIdSet.has(edge.id) ||
-                edge.source === hoveredNodeId ||
-                edge.target === hoveredNodeId
+                remappedSource === hoveredNodeId ||
+                remappedTarget === hoveredNodeId
               : false,
-            },
-        };
-      }),
-    [activeEdgeIdSet, displayNodeMap, graphEdges, hoveredNodeId, probabilityViewMode],
+          },
+        }];
+      });
+    },
+    [
+      activeEdgeIdSet,
+      displayNodeMap,
+      graphEdges,
+      hoveredNodeId,
+      probabilityViewMode,
+      promptDisplayNodes,
+      promptTokensVisible,
+    ],
   );
+  const promptChainEdges = useMemo<ProbabilityFlowEdge[]>(() => {
+    if (!promptTokensVisible || promptDisplayNodes.length === 0) {
+      return [];
+    }
 
-  const selectedNode =
-    (selectedNodeId ? displayNodeMap.get(selectedNodeId) ?? null : null) ??
-    (activePathIds[activePathIds.length - 1]
-      ? displayNodeMap.get(activePathIds[activePathIds.length - 1]) ?? null
-      : null) ??
-    null;
-  const activeLeafNodeId = activePathIds[activePathIds.length - 1] ?? null;
-  const selectedRecord =
-    (selectedNodeId ? tokenGraph.nodesById[selectedNodeId] ?? null : null) ??
-    (activeLeafNodeId ? tokenGraph.nodesById[activeLeafNodeId] ?? null : null);
-  const inspectorAlternativeView = useMemo(
+    const derivedEdges: ProbabilityFlowEdge[] = [];
+
+    for (let index = 0; index < promptDisplayNodes.length; index += 1) {
+      const sourceNode = promptDisplayNodes[index];
+      const targetNode = promptDisplayNodes[index + 1] ?? null;
+
+      if (!sourceNode || !targetNode) {
+        continue;
+      }
+
+      derivedEdges.push({
+        id: `prompt-chain:${sourceNode.id}:${targetNode.id}`,
+        source: sourceNode.id,
+        target: targetNode.id,
+        type: "probabilityEdge",
+        selectable: false,
+        data: {
+          probability: 0.52,
+          rawProbability: 0.52,
+          probabilityCoverage: 1,
+          remainingProbabilityMass: 0,
+          probabilityMode: "raw",
+          continuationMode: "exact",
+          isModeBoundary: false,
+          isMainPath: false,
+          isActiveReality: false,
+          isDimmed:
+            (sourceNode.data.isDimmed ?? false) || (targetNode.data.isDimmed ?? false),
+          isFocused: false,
+        },
+      });
+    }
+
+    return derivedEdges;
+  }, [promptDisplayNodes, promptTokensVisible]);
+  const displayAttentionEdges = useMemo<AttentionFlowEdge[]>(
     () =>
-      buildInspectorAlternatives(
-        tokenGraph,
-        selectedNode?.id ?? activeLeafNodeId,
-        probabilityViewMode,
-      ),
-    [activeLeafNodeId, probabilityViewMode, selectedNode?.id, tokenGraph],
+      attentionOverlayEdges.map((edge) => {
+        const edgeData = edge.data as AttentionFlowEdge["data"];
+
+        return {
+          ...edge,
+          data: {
+            ...edgeData,
+            isDimmed:
+              (displayNodeMap.get(edge.source)?.data.isDimmed ?? false) ||
+              (displayNodeMap.get(edge.target)?.data.isDimmed ?? false),
+          },
+        } as AttentionFlowEdge;
+      }),
+    [attentionOverlayEdges, displayNodeMap],
   );
-  const inspectorAlternatives = inspectorAlternativeView.items;
-  const selectedProviderIdForInspector =
-    readMetadataString(selectedNode?.data.metadata ?? null, "provider") ??
-    generation?.request.provider ??
-    selectedProvider;
-  const selectedProviderLabelForInspector = findProviderOption(
-    providers,
-    selectedProviderIdForInspector,
-  ).label;
-  const generatedModelOption = findModelOption(models, generation?.request.model ?? model);
-  const generatedPresetOption = findPresetOption(presets, generation?.request.preset ?? preset);
+  const renderEdges = useMemo<CanvasFlowEdge[]>(
+    () => [...promptChainEdges, ...displayEdges, ...displayAttentionEdges],
+    [displayAttentionEdges, displayEdges, promptChainEdges],
+  );
+  const naturalReason = buildNaturalLanguageReason(
+    selectedNode,
+    inspectorAlternatives,
+    probabilityViewMode,
+  );
+  const selectedNodeMetrics =
+    selectedNode
+      ? getNodeMetrics(selectedNode.data.tokenText || selectedNode.data.decodedContribution, selectedNode.data.tokenBytes)
+      : null;
+  const isSelectedPromptToken = isPromptTokenDisplayNode(selectedNode);
+  const selectedNodeDisplayLabel = selectedNode
+    ? getDisplayLabelForTokenMode(selectedNode.data, tokenDisplayMode)
+    : "Select a token";
+  const attentionSourceEntries = useMemo(() => {
+    if (!attentionAnalysis || !attentionValidation) {
+      return [];
+    }
+
+    return attentionAnalysis.sources.map((source) => {
+      const sourceId = buildAttentionTokenId(source.sequence_scope, source.full_position);
+      const graphNodeId =
+        source.sequence_scope === "generated"
+          ? attentionValidation.lineageNodeIds[(source.generated_token_index ?? -1) + 1] ?? null
+          : promptTokensVisible
+            ? (promptNodeIdByPosition.get(source.full_position) ?? null)
+            : "root";
+      const sourceLabel =
+        source.sequence_scope === "prompt" && !promptTokensVisible
+          ? "Prompt summary"
+          : source.source_label;
+
+      return {
+        graphNodeId,
+        isCanvasNodeUnavailable: graphNodeId === null,
+        source: {
+          ...source,
+          source_label: sourceLabel,
+        },
+        sourceId,
+      };
+    });
+  }, [
+    attentionAnalysis,
+    attentionValidation,
+    promptNodeIdByPosition,
+    promptTokensVisible,
+  ]);
+  const attentionSourceEntryById = useMemo(
+    () => new Map(attentionSourceEntries.map((entry) => [entry.sourceId, entry])),
+    [attentionSourceEntries],
+  );
+  const visibleAttentionSourceCount = useMemo(
+    () =>
+      attentionSourceEntries.filter(
+        (entry) => entry.graphNodeId !== null && displayNodeMap.has(entry.graphNodeId),
+      ).length,
+    [attentionSourceEntries, displayNodeMap],
+  );
+  const canFocusAttention =
+    attentionLensEnabled &&
+    Boolean(selectedGraphNode?.id) &&
+    attentionSourceEntries.some((entry) => entry.graphNodeId !== null);
+  const showAttentionInspectorSection =
+    Boolean(
+      selectedNode &&
+        selectedNode.data.providerCapabilities.supports_attention &&
+        (
+          readMetadataString(selectedNode.data.metadata ?? null, "provider") ??
+          generationProviderId ??
+          null
+        ) === "hugging_face",
+    );
+  const attentionHeadline =
+    attentionAnalysisMode === "representation"
+      ? `How "${selectedNodeDisplayLabel}" attended backward after entering the sequence`
+      : `What did the model attend to while predicting "${selectedNodeDisplayLabel}"?`;
+  const attentionModeDescription =
+    attentionAnalysisMode === "representation"
+      ? `How "${selectedNodeDisplayLabel}" attended backward after entering the sequence`
+      : `Attention used while predicting "${selectedNodeDisplayLabel}"`;
+  const attentionUnavailableMessage =
+    showAttentionInspectorSection && !attentionAvailable
+      ? promptTokensAvailable
+        ? isSelectedPromptToken
+          ? 'Select a generated token to inspect prediction attention, or select a prompt token to inspect how that token represented earlier context. Prompt-token target analysis is not yet available in this view, but prompt tokens remain exact input-context nodes and attention sources.'
+          : "Select a generated token to inspect prediction attention, or select a prompt token to inspect how that token represented earlier context."
+        : "Attention analysis is unavailable for this graph because canonical prompt-token metadata was not saved with it."
+      : null;
   const activeSentenceNodes = activePathIds
     .slice(1)
     .map((nodeId) => displayNodeMap.get(nodeId))
@@ -2306,25 +3171,6 @@ function Workspace() {
   const hasSentenceContent = activeSentenceNodes.length > 0 || Boolean(currentSentenceText);
   const isSentenceBarCollapsed =
     hasSentenceContent && !isGenerating && !isReplaying && !isSentenceBarExpanded;
-  const naturalReason = buildNaturalLanguageReason(
-    selectedNode,
-    inspectorAlternatives,
-    probabilityViewMode,
-  );
-  const selectedNodeMetrics =
-    selectedNode && selectedRecord
-      ? getNodeMetrics(selectedRecord.decodedContribution, selectedRecord.tokenBytes)
-      : null;
-  const selectedNodeDisplayLabel = selectedNode
-    ? getDisplayLabelForTokenMode(selectedNode.data, tokenDisplayMode)
-    : "Select a token";
-  const inspectorCoverage = inspectorAlternativeView.coverage;
-  const inspectorRemainingProbabilityMass =
-    inspectorAlternativeView.remainingProbabilityMass;
-  const changedTokenIndexSet = useMemo(
-    () => new Set(changedTokenIndexes),
-    [changedTokenIndexes],
-  );
   const currentRealityTokens = useMemo<CurrentRealityTokenItem[]>(
     () =>
       activeSentenceNodes.map((node, index) => ({
@@ -2340,6 +3186,171 @@ function Workspace() {
         supportsLogprobs: node.data.providerCapabilities.supports_logprobs,
       })),
     [activeSentenceNodes, changedTokenIndexSet],
+  );
+  const currentRealityAssistantContextTokens = useMemo<RealityAssistantTokenItem[]>(
+    () =>
+      activeSentenceNodes.map((node) => ({
+        decodedContribution: node.data.decodedContribution,
+        displayToken: node.data.displayTokenText,
+        graphTokenId: node.id,
+        id: node.id,
+        rank: node.data.rank,
+        rawToken: node.data.tokenText,
+        step: node.data.generationStep,
+        tokenId: node.data.tokenId,
+      })),
+    [activeSentenceNodes],
+  );
+  const currentRealityPromptGroups = useMemo<RealityTokenGroup[]>(
+    () => groupPromptTokens(generationPromptTokens, promptNodeIdByPosition),
+    [generationPromptTokens, promptNodeIdByPosition],
+  );
+  const currentRealityPromptDisplayGroups = useMemo<CurrentRealityTokenGroup[]>(
+    () =>
+      currentRealityPromptGroups.map((group) => ({
+        category: group.category,
+        id: group.id,
+        label: group.label,
+        tokens: group.tokens.map((token): CurrentRealityGroupedTokenItem => {
+          const promptToken = token as RealityPromptTokenItem;
+
+          return {
+          canonicalPosition: promptToken.canonicalPosition,
+          decodedContribution: promptToken.decodedContribution,
+          displayProbability: null,
+          displayToken: promptToken.displayToken,
+          graphTokenId: promptToken.graphTokenId,
+          id: promptToken.id,
+          kind: "prompt",
+          rank: null,
+          rawProbability: null,
+          rawToken: promptToken.rawToken,
+          sourceCategory: promptToken.sourceCategory,
+          sourceLabel: promptToken.sourceLabel,
+          specialToken: promptToken.specialToken,
+          step: promptToken.canonicalPosition,
+          supportsLogprobs: false,
+          tokenId: promptToken.tokenId,
+        };
+        }),
+      })),
+    [currentRealityPromptGroups],
+  );
+  const currentRealityConversationSections = useMemo<CurrentRealityConversationSection[]>(
+    () =>
+      buildConversationSections({
+        assistantTokens: currentRealityAssistantContextTokens,
+        contextMessages: generationContextMessages,
+        promptGroups: currentRealityPromptGroups,
+      }).map((section) => ({
+        id: section.id,
+        label: section.label,
+        role: section.role,
+        text: section.text,
+        tokenIds: section.tokenIds,
+      })),
+    [
+      currentRealityAssistantContextTokens,
+      currentRealityPromptGroups,
+      generationContextMessages,
+    ],
+  );
+  const currentRealityFormattingSelection = useMemo<CurrentRealityFormattingSelection | null>(
+    () => {
+      const summaryRecord = buildFormattingSelectionSummary(
+        currentRealityPromptGroups,
+        selectedNodeId,
+      );
+
+      if (!summaryRecord) {
+        return null;
+      }
+
+      return {
+        description:
+          summaryRecord.category === "assistant_prefix"
+            ? "Selected assistant-prefix token"
+            : "Selected formatting token hidden in Conversation mode",
+        label: summaryRecord.label,
+        token: summaryRecord.token.rawToken,
+      };
+    },
+    [currentRealityPromptGroups, selectedNodeId],
+  );
+  const currentRealityRawContextText = useMemo(
+    () =>
+      buildCurrentRealityRawContext({
+        assistantTokens: currentRealityAssistantContextTokens,
+        promptGroups: currentRealityPromptGroups,
+        rawContextText: generation?.raw_context_text ?? null,
+      }),
+    [
+      currentRealityAssistantContextTokens,
+      currentRealityPromptGroups,
+      generation?.raw_context_text,
+    ],
+  );
+  const currentRealityConversationCopyText = useMemo(
+    () =>
+      currentRealityConversationSections
+        .map((section) => `${section.label.toUpperCase()}\n${section.text}`.trim())
+        .filter(Boolean)
+        .join("\n\n"),
+    [currentRealityConversationSections],
+  );
+  const currentRealityUserPromptCopyText = useMemo(
+    () =>
+      currentRealityConversationSections.find((section) => section.role === "user")?.text ?? "",
+    [currentRealityConversationSections],
+  );
+  const currentRealityTokenIdCopyText = useMemo(
+    () =>
+      buildCurrentRealityTokenIdList({
+        assistantTokens: currentRealityAssistantContextTokens,
+        promptGroups: currentRealityPromptGroups,
+      }),
+    [currentRealityAssistantContextTokens, currentRealityPromptGroups],
+  );
+  const currentRealityBranchBreadcrumb = useMemo(
+    () => buildBranchBreadcrumb(currentRealityAssistantContextTokens),
+    [currentRealityAssistantContextTokens],
+  );
+  const currentRealityAttentionTokens = useMemo<CurrentRealityAttentionTokenItem[]>(
+    () =>
+      attentionLensEnabled && attentionAnalysis && attentionValidation
+        ? buildAttentionStripTokens({
+            analysis: attentionAnalysis,
+            lineageNodeIds: attentionValidation.lineageNodeIds,
+            pinnedSourceTokenIds: pinnedAttentionSourceIdSet,
+            promptNodeIdByPosition: promptTokensVisible ? promptNodeIdByPosition : undefined,
+          }).map((token): CurrentRealityAttentionTokenItem => ({
+            attentionWeight: token.attentionWeight,
+            decodedContribution: token.decodedContribution,
+            displayToken:
+              tokenDisplayMode === "raw"
+                ? token.rawToken || token.displayToken
+                : tokenDisplayMode === "token_id"
+                  ? `#${token.tokenId}`
+                  : token.displayToken || token.decodedContribution || token.rawToken,
+            fullPosition: token.fullPosition,
+            graphTokenId: token.graphTokenId,
+            id: token.id,
+            isPinned: token.isPinned,
+            isQuery: token.isQuery,
+            rawToken: token.rawToken,
+            sequenceScope: token.sequenceScope,
+            tokenId: token.tokenId,
+          }))
+        : [],
+    [
+      attentionAnalysis,
+      attentionLensEnabled,
+      attentionValidation,
+      pinnedAttentionSourceIdSet,
+      promptNodeIdByPosition,
+      promptTokensVisible,
+      tokenDisplayMode,
+    ],
   );
   const currentRealityStats = useMemo<CurrentRealityStats>(
     () => ({
@@ -2374,6 +3385,71 @@ function Workspace() {
       }),
     [activeSentenceNodes, selectedNode?.data.continuationMode, selectedNode?.data.metadata],
   );
+  const currentRealitySummaryItems = useMemo<CurrentRealitySummaryItem[]>(() => {
+    const contextWindowLimit =
+      generationProviderId === "hugging_face"
+        ? (huggingFaceLocalStatus?.limits.context_window_tokens ?? null)
+        : null;
+    const promptCount = generation?.stats.prompt_tokens ?? generationPromptTokens.length;
+    const outputCount = currentRealityTokens.length;
+    const contextUsageValue =
+      typeof contextWindowLimit === "number" && contextWindowLimit > 0
+        ? `${promptCount + outputCount} / ${contextWindowLimit}`
+        : `${promptCount + outputCount} used`;
+
+    return [
+      {
+        label: "Provider",
+        tone: "muted",
+        value: selectedProviderOption.label,
+      },
+      {
+        label: "Model",
+        tone: "muted",
+        value: findModelOption(models, generation?.request.model ?? model).label,
+      },
+      {
+        label: "Prompt",
+        value: `${promptCount} tokens`,
+      },
+      {
+        label: "Context",
+        value: contextUsageValue,
+      },
+    ];
+  }, [
+    generation?.request.model,
+    generation?.stats.prompt_tokens,
+    generationPromptTokens.length,
+    generationProviderId,
+    huggingFaceLocalStatus?.limits.context_window_tokens,
+    currentRealityTokens.length,
+    model,
+    models,
+    selectedProviderOption.label,
+  ]);
+  const currentRealityDetailItems = useMemo<CurrentRealitySummaryItem[]>(
+    () => [
+      { label: "Temperature", value: String(generation?.request.temperature ?? temperature) },
+      { label: "Top-p", value: String(generation?.request.top_p ?? topP) },
+      {
+        label: "Selected branch",
+        value: currentRealityBranchBreadcrumb,
+      },
+      {
+        label: "Output tokens",
+        value: String(currentRealityTokens.length),
+      },
+    ],
+    [
+      currentRealityBranchBreadcrumb,
+      currentRealityTokens.length,
+      generation?.request.temperature,
+      generation?.request.top_p,
+      temperature,
+      topP,
+    ],
+  );
   const inspectorContinuationMode = useMemo(
     () =>
       getContinuationModePresentation({
@@ -2405,6 +3481,398 @@ function Workspace() {
 
     return -1;
   })();
+  const attentionGraphVersion = useMemo(
+    () =>
+      `${tokenGraph.rootPrompt}\u0001${tokenGraph.generationOrder.join("|")}\u0001${
+        Object.keys(tokenGraph.nodesById).length
+      }`,
+    [tokenGraph.generationOrder, tokenGraph.nodesById, tokenGraph.rootPrompt],
+  );
+
+  const restoreAttentionViewport = useCallback((overrideViewport?: {
+    x: number;
+    y: number;
+    zoom: number;
+  } | null) => {
+    const savedViewport = overrideViewport ?? attentionViewportRef.current;
+
+    if (!savedViewport || !flowRef.current) {
+      if (!overrideViewport) {
+        attentionViewportRef.current = null;
+      }
+      return;
+    }
+
+    if (!overrideViewport) {
+      attentionViewportRef.current = null;
+    }
+    setViewport((currentViewport) =>
+      currentViewport.x === savedViewport.x &&
+      currentViewport.y === savedViewport.y &&
+      currentViewport.zoom === savedViewport.zoom
+        ? currentViewport
+        : savedViewport,
+    );
+    void flowRef.current.setViewport(savedViewport, {
+      duration: 420,
+    });
+  }, []);
+
+  const logAttentionDiagnostics = useCallback(
+    (
+      reason: string,
+      options?: {
+        bounds?: ReturnType<typeof buildDeterministicFocusViewport>["bounds"];
+        focusCandidateIds?: string[];
+        includedFocusIds?: string[];
+        targetViewport?: { x: number; y: number; zoom: number } | null;
+      },
+    ) => {
+      if (process.env.NODE_ENV === "production") {
+        return null;
+      }
+
+      const instance = flowRef.current;
+      const liveNodes =
+        ((instance?.getNodes() as Array<
+          TokenFlowNode & {
+            height?: number;
+            measured?: { height?: number; width?: number };
+            width?: number;
+          }
+        > | undefined) ?? []);
+      const liveNodeMap = new Map(liveNodes.map((node) => [node.id, node]));
+      const internalNodeGetter = (
+        instance as unknown as {
+          getInternalNode?: (nodeId: string) => {
+            measured?: { height?: number; width?: number };
+            internals?: { positionAbsolute?: { x: number; y: number } };
+          } | null;
+        } | null
+      )?.getInternalNode;
+      const containerElement = document.querySelector(".react-flow");
+      const containerRect = containerElement?.getBoundingClientRect() ?? null;
+      const currentZoom = instance?.getViewport().zoom ?? viewport.zoom ?? 1;
+      const relevantNodeIds = new Set<string>([
+        ...promptDisplaySummary.promptNodeIds,
+        ...(selectedGraphNode?.id ? [selectedGraphNode.id] : []),
+        ...attentionSourceEntries
+          .map((entry) => entry.graphNodeId)
+          .filter((nodeId): nodeId is string => Boolean(nodeId)),
+        ...(options?.focusCandidateIds ?? []),
+        ...(options?.includedFocusIds ?? []),
+      ]);
+      const nodeSnapshots = [...relevantNodeIds].map((nodeId) => {
+        const displayNode = displayNodeMap.get(nodeId) ?? null;
+        const liveNode = liveNodeMap.get(nodeId) ?? null;
+        const internalNode = internalNodeGetter?.(nodeId) ?? null;
+        const domElement = document.querySelector(`[data-id="${CSS.escape(nodeId)}"]`);
+        const domRect = domElement?.getBoundingClientRect() ?? null;
+        const measuredWidth =
+          internalNode?.measured?.width ??
+          liveNode?.measured?.width ??
+          liveNode?.width ??
+          (domRect && currentZoom > 0 ? domRect.width / currentZoom : null);
+        const measuredHeight =
+          internalNode?.measured?.height ??
+          liveNode?.measured?.height ??
+          liveNode?.height ??
+          (domRect && currentZoom > 0 ? domRect.height / currentZoom : null);
+        const isInsideViewport = Boolean(
+          domRect &&
+            containerRect &&
+            domRect.width > 0 &&
+            domRect.height > 0 &&
+            domRect.right >= containerRect.left &&
+            domRect.left <= containerRect.right &&
+            domRect.bottom >= containerRect.top &&
+            domRect.top <= containerRect.bottom,
+        );
+
+        return {
+          canonicalPosition:
+            displayNode?.data.kind === "prompt"
+              ? readMetadataNumber(displayNode.data.metadata, "prompt_position")
+              : displayNode?.data.tokenIndex ?? null,
+          displayNodeHidden: displayNode?.hidden ?? null,
+          domRect:
+            domRect
+              ? {
+                  bottom: domRect.bottom,
+                  height: domRect.height,
+                  left: domRect.left,
+                  right: domRect.right,
+                  top: domRect.top,
+                  width: domRect.width,
+                  x: domRect.x,
+                  y: domRect.y,
+                }
+              : null,
+          existsInDom: Boolean(domElement),
+          existsInFlowGetNodes: liveNodeMap.has(nodeId),
+          id: nodeId,
+          includedInFocus: options?.includedFocusIds?.includes(nodeId) ?? false,
+          insideVisibleViewport: isInsideViewport,
+          internalPositionAbsolute:
+            internalNode?.internals?.positionAbsolute
+              ? {
+                  x: internalNode.internals.positionAbsolute.x,
+                  y: internalNode.internals.positionAbsolute.y,
+                }
+              : null,
+          measured:
+            liveNode || domRect
+              ? {
+                  height: measuredHeight,
+                  width: measuredWidth,
+                }
+              : null,
+          position:
+            liveNode
+              ? {
+                  x: liveNode.position.x,
+                  y: liveNode.position.y,
+                }
+              : null,
+          sourceCategory: displayNode?.data.sourceCategory ?? null,
+          type: displayNode?.data.kind ?? null,
+        };
+      });
+      const snapshot = {
+        bounds: options?.bounds ?? null,
+        currentViewport: instance?.getViewport() ?? viewport,
+        displayNodeCount: displayNodes.length,
+        domNodeCount: document.querySelectorAll(".react-flow__node").length,
+        domPromptNodeCount: document.querySelectorAll('[data-id^="prompt-token-"]').length,
+        focusCandidateIds: options?.focusCandidateIds ?? [],
+        includedFocusIds: options?.includedFocusIds ?? [],
+        liveNodeCount: liveNodes.length,
+        nodes: nodeSnapshots,
+        promptExpansionState: {
+          canonicalPromptTokenCount: generationPromptTokens.length,
+          constructedPromptNodeCount: promptDisplayNodes.length,
+          invariant: promptDisplaySummary,
+          showPromptTokens,
+        },
+        reactFlowContainerRect:
+          containerRect
+            ? {
+                bottom: containerRect.bottom,
+                height: containerRect.height,
+                left: containerRect.left,
+                right: containerRect.right,
+                top: containerRect.top,
+                width: containerRect.width,
+                x: containerRect.x,
+                y: containerRect.y,
+              }
+            : null,
+        reason,
+        targetViewport: options?.targetViewport ?? null,
+      };
+
+      (window as typeof window & { __LLMSCOPE_LAST_DIAGNOSTIC__?: unknown }).__LLMSCOPE_LAST_DIAGNOSTIC__ =
+        snapshot;
+      console.debug("[llmscope-attention]", snapshot);
+      return snapshot;
+    },
+    [
+      attentionSourceEntries,
+      displayNodeMap,
+      displayNodes,
+      generationPromptTokens.length,
+      promptDisplayNodes.length,
+      promptDisplaySummary,
+      selectedGraphNode?.id,
+      showPromptTokens,
+      viewport,
+    ],
+  );
+
+  const computeAttentionFocusViewport = useCallback(() => {
+    const instance = flowRef.current;
+    const containerElement = document.querySelector(".react-flow");
+
+    if (!instance || !containerElement || !selectedGraphNode?.id) {
+      logAttentionDiagnostics("focus-attention:missing-prerequisites");
+      return null;
+    }
+
+    const containerRect = containerElement.getBoundingClientRect();
+    const inspectorRect = document.querySelector(".inspector-panel")?.getBoundingClientRect() ?? null;
+    const focusViewportInset = {
+      right:
+        inspectorRect && inspectorRect.right > containerRect.left
+          ? Math.max(
+              containerRect.right - inspectorRect.left + ATTENTION_FOCUS_OCCLUSION_MARGIN,
+              0,
+            )
+          : 0,
+    };
+    const currentZoom = instance.getViewport().zoom || 1;
+    const liveNodes = (instance.getNodes() as Array<
+      TokenFlowNode & {
+        height?: number;
+        measured?: { height?: number; width?: number };
+        width?: number;
+      }
+    >) ?? [];
+    const internalNodeGetter = (
+      instance as unknown as {
+        getInternalNode?: (nodeId: string) => {
+          measured?: { height?: number; width?: number };
+          internals?: { positionAbsolute?: { x: number; y: number } };
+        } | null;
+      }
+    ).getInternalNode;
+    const sourceNodeIds = attentionSourceEntries
+      .map((entry) => entry.graphNodeId)
+      .filter((nodeId): nodeId is string => Boolean(nodeId));
+    const focusResult = buildDeterministicFocusViewport({
+      containerHeight: containerRect.height,
+      containerWidth: containerRect.width,
+      maxZoom: ATTENTION_FOCUS_MAX_ZOOM,
+      minZoom: ATTENTION_FOCUS_MIN_ZOOM,
+      nodes: liveNodes.map((node) => {
+        const internalNode = internalNodeGetter?.(node.id) ?? null;
+        const positionAbsolute = internalNode?.internals?.positionAbsolute ?? node.position;
+        const domElement = document.querySelector(`[data-id="${CSS.escape(node.id)}"]`);
+        const domRect = domElement?.getBoundingClientRect() ?? null;
+        const width =
+          internalNode?.measured?.width ??
+          node.measured?.width ??
+          node.width ??
+          (domRect && currentZoom > 0 ? domRect.width / currentZoom : null);
+        const height =
+          internalNode?.measured?.height ??
+          node.measured?.height ??
+          node.height ??
+          (domRect && currentZoom > 0 ? domRect.height / currentZoom : null);
+
+        return {
+          height,
+          hidden: Boolean(node.hidden),
+          id: node.id,
+          inDom: Boolean(domElement),
+          width,
+          x: positionAbsolute?.x ?? null,
+          y: positionAbsolute?.y ?? null,
+        };
+      }),
+      padding: ATTENTION_FOCUS_PADDING,
+      selectedNodeId: selectedGraphNode.id,
+      sourceNodeIds,
+      viewportInset: focusViewportInset,
+    });
+
+    logAttentionDiagnostics("focus-attention:computed", {
+      bounds: focusResult.bounds,
+      focusCandidateIds: [selectedGraphNode.id, ...sourceNodeIds],
+      includedFocusIds: focusResult.includedIds,
+      targetViewport: focusResult.viewport,
+    });
+
+    return focusResult;
+  }, [attentionSourceEntries, logAttentionDiagnostics, selectedGraphNode?.id]);
+
+  const focusAttentionNeighborhood = useCallback(async () => {
+    if (!attentionLensEnabled || !selectedGraphNode?.id) {
+      logAttentionDiagnostics("focus-attention:skipped");
+      return false;
+    }
+
+    const hasPromptSources = attentionSourceEntries.some(
+      (entry) => entry.source.sequence_scope === "prompt",
+    );
+
+    if (hasPromptSources && !promptTokensVisible) {
+      setShowPromptTokens(true);
+      await waitForAnimationFrames(2);
+      await waitForAnimationFrames(2);
+    }
+
+    const focusResult = computeAttentionFocusViewport();
+
+    if (!focusResult?.viewport || !flowRef.current) {
+      console.warn("[llmscope-attention] focus-attention-unavailable");
+      return false;
+    }
+
+    if (!attentionViewportRef.current) {
+      attentionViewportRef.current = flowRef.current.getViewport();
+    }
+
+    setViewport((currentViewport) =>
+      currentViewport.x === focusResult.viewport!.x &&
+      currentViewport.y === focusResult.viewport!.y &&
+      currentViewport.zoom === focusResult.viewport!.zoom
+        ? currentViewport
+        : focusResult.viewport!,
+    );
+    void flowRef.current.setViewport(focusResult.viewport, {
+      duration: ATTENTION_FOCUS_DURATION_MS,
+    });
+    return true;
+  }, [
+    attentionLensEnabled,
+    attentionSourceEntries,
+    computeAttentionFocusViewport,
+    logAttentionDiagnostics,
+    promptTokensVisible,
+    selectedGraphNode?.id,
+  ]);
+
+  const clearAttentionLens = useCallback((options?: { restoreViewport?: boolean }) => {
+    const shouldRestoreViewport = options?.restoreViewport ?? true;
+    attentionAbortRef.current?.abort();
+    attentionAbortRef.current = null;
+    const savedViewport = attentionViewportRef.current;
+    setAttentionLensEnabled(false);
+    setAttentionAnalysis((currentValue) => (currentValue === null ? currentValue : null));
+    setPinnedAttentionSourceIds((currentValue) => (currentValue.length === 0 ? currentValue : []));
+    setAttentionError((currentValue) => (currentValue === null ? currentValue : null));
+    setAttentionLoading(false);
+    attentionViewportRef.current = null;
+
+    if (shouldRestoreViewport && savedViewport) {
+      restoreAttentionViewport(savedViewport);
+    }
+  }, [restoreAttentionViewport]);
+
+  const toggleAttentionLens = useCallback(() => {
+    if (attentionLensEnabled) {
+      clearAttentionLens({ restoreViewport: true });
+      return;
+    }
+
+    setPinnedAttentionSourceIds([]);
+    setAttentionError(null);
+    setAttentionLensEnabled(true);
+  }, [attentionLensEnabled, clearAttentionLens]);
+
+  const togglePromptTokens = useCallback(() => {
+    if (!promptTokensAvailable) {
+      return;
+    }
+
+    setShowPromptTokens((currentValue) => !currentValue);
+  }, [promptTokensAvailable]);
+
+  const handleAttentionSourceFocus = useCallback((sourceId: string, graphNodeId: string | null) => {
+    setPinnedAttentionSourceIds((currentValue) =>
+      currentValue.length === 1 && currentValue[0] === sourceId ? [] : [sourceId],
+    );
+
+    if (graphNodeId && displayNodeMap.has(graphNodeId)) {
+      centerNodeRef.current(graphNodeId);
+      return;
+    }
+
+    console.warn("[llmscope-attention] source-node-unavailable", {
+      graphNodeId,
+      sourceId,
+    });
+  }, [displayNodeMap]);
 
   useEffect(() => {
     nodesRef.current = graphNodes;
@@ -2426,6 +3894,20 @@ function Workspace() {
   }, [tokenGraph]);
 
   useEffect(() => {
+    attentionAbortRef.current?.abort();
+    attentionAbortRef.current = null;
+    attentionCacheRef.current.clear();
+    setAttentionAnalysis((currentValue) => (currentValue === null ? currentValue : null));
+    setPinnedAttentionSourceIds((currentValue) => (currentValue.length === 0 ? currentValue : []));
+    setAttentionAdvancedOpen(false);
+    setShowAllAttentionTokens(false);
+    setShowPromptTokens(false);
+    setAttentionError((currentValue) => (currentValue === null ? currentValue : null));
+    setAttentionLoading(false);
+    attentionViewportRef.current = null;
+  }, [attentionGraphVersion, selectedProvider]);
+
+  useEffect(() => {
     branchChoicesRef.current = branchChoices;
   }, [branchChoices]);
 
@@ -2444,6 +3926,159 @@ function Workspace() {
   useEffect(() => {
     selectedNodeIdRef.current = selectedNodeId;
   }, [selectedNodeId]);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV === "production" || !promptTokensAvailable) {
+      return;
+    }
+
+    const expectedPromptNodeCount = promptTokensVisible ? generationPromptTokens.length : 0;
+    const expectedPromptSummaryCount = promptTokensVisible ? 0 : 1;
+    const hasDuplicatePromptIds =
+      new Set(promptDisplaySummary.promptNodeIds).size !== promptDisplaySummary.promptNodeCount;
+
+    if (
+      promptDisplaySummary.promptNodeCount !== expectedPromptNodeCount ||
+      promptDisplaySummary.promptSummaryCount !== expectedPromptSummaryCount ||
+      hasDuplicatePromptIds
+    ) {
+      console.warn("[llmscope-attention] prompt-display-invariant-failed", {
+        expectedPromptNodeCount,
+        expectedPromptSummaryCount,
+        promptDisplaySummary,
+      });
+    }
+  }, [
+    generationPromptTokens.length,
+    promptDisplaySummary,
+    promptTokensAvailable,
+    promptTokensVisible,
+  ]);
+
+  useEffect(() => {
+    if (attentionLensEnabled && !attentionAvailable && !isSelectedPromptToken) {
+      clearAttentionLens({ restoreViewport: false });
+    }
+  }, [attentionAvailable, attentionLensEnabled, clearAttentionLens, isSelectedPromptToken]);
+
+  useEffect(() => {
+    if (!attentionLensEnabled || !selectedGraphNode?.id) {
+      return;
+    }
+
+    setPinnedAttentionSourceIds((currentValue) => (currentValue.length === 0 ? currentValue : []));
+    setAttentionAnalysis((currentValue) => (currentValue === null ? currentValue : null));
+  }, [attentionLensEnabled, selectedGraphNode?.id]);
+
+  useEffect(() => {
+    if (!attentionLensEnabled || !attentionRequest) {
+      attentionAbortRef.current?.abort();
+      attentionAbortRef.current = null;
+      setAttentionLoading(false);
+      setAttentionError((currentValue) => (currentValue === null ? currentValue : null));
+      if (!attentionLensEnabled) {
+        setAttentionAnalysis((currentValue) => (currentValue === null ? currentValue : null));
+        setPinnedAttentionSourceIds((currentValue) => (currentValue.length === 0 ? currentValue : []));
+      }
+      return;
+    }
+
+    const cached = attentionCacheRef.current.get(attentionRequest.cacheKey) ?? null;
+    if (cached) {
+      setAttentionAnalysis((currentValue) =>
+        JSON.stringify(currentValue) === JSON.stringify(cached) ? currentValue : cached,
+      );
+      setAttentionLoading(false);
+      setAttentionError((currentValue) => (currentValue === null ? currentValue : null));
+      return;
+    }
+
+    const controller = new AbortController();
+    attentionAbortRef.current?.abort();
+    attentionAbortRef.current = controller;
+    setAttentionLoading(true);
+    setAttentionError((currentValue) => (currentValue === null ? currentValue : null));
+
+    void (async () => {
+      try {
+        const response = await fetch("/api/providers/hugging-face-local/attention", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(attentionRequest.request),
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          await throwApiError(response);
+        }
+
+        const payload = (await response.json()) as HuggingFaceAttentionResponse;
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        const nextCache = attentionCacheRef.current;
+        nextCache.set(attentionRequest.cacheKey, payload);
+        while (nextCache.size > 32) {
+          const oldestKey = nextCache.keys().next().value;
+          if (!oldestKey) {
+            break;
+          }
+          nextCache.delete(oldestKey);
+        }
+        setAttentionAnalysis((currentValue) =>
+          JSON.stringify(currentValue) === JSON.stringify(payload) ? currentValue : payload,
+        );
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return;
+        }
+        setAttentionAnalysis(null);
+        setPinnedAttentionSourceIds((currentValue) => (currentValue.length === 0 ? currentValue : []));
+        setAttentionError(
+          error instanceof Error ? error.message : "Unable to compute attention for this token.",
+        );
+      } finally {
+        if (!controller.signal.aborted) {
+          setAttentionLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      controller.abort();
+    };
+  }, [attentionLensEnabled, attentionRequest]);
+
+  useEffect(() => {
+    if (!promptTokensVisible || previousPromptTokensVisibleRef.current) {
+      previousPromptTokensVisibleRef.current = promptTokensVisible;
+      return;
+    }
+
+    previousPromptTokensVisibleRef.current = promptTokensVisible;
+    void waitForAnimationFrames(2).then(() => {
+      logAttentionDiagnostics("prompt-tokens-shown");
+    });
+  }, [logAttentionDiagnostics, promptTokensVisible]);
+
+  useEffect(() => {
+    if (!attentionLensEnabled || !attentionAnalysis) {
+      lastLoggedAttentionAnalysisRef.current = attentionAnalysis;
+      return;
+    }
+
+    if (lastLoggedAttentionAnalysisRef.current === attentionAnalysis) {
+      return;
+    }
+
+    lastLoggedAttentionAnalysisRef.current = attentionAnalysis;
+    void waitForAnimationFrames(2).then(() => {
+      logAttentionDiagnostics("attention-analysis-complete");
+    });
+  }, [attentionAnalysis, attentionLensEnabled, logAttentionDiagnostics]);
 
   useEffect(() => {
     const nextModel = findCompatibleModelId(models, selectedProvider, model);
@@ -2525,13 +4160,16 @@ function Workspace() {
       }
 
       if (event.key === "Escape") {
+        if (attentionLensEnabled) {
+          clearAttentionLens({ restoreViewport: true });
+        }
         setContextMenu(null);
       }
     };
 
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  }, []);
+  }, [attentionLensEnabled, clearAttentionLens]);
 
   async function loadModelCatalog(forceRefresh = false) {
     setIsLoadingModels(true);
@@ -2889,7 +4527,10 @@ function Workspace() {
   applyTransitionRef.current = applyTransition;
 
   function centerNode(nodeId: string) {
-    const node = nodesRef.current.find((currentNode) => currentNode.id === nodeId);
+    const node =
+      displayNodeMap.get(nodeId) ??
+      nodesRef.current.find((currentNode) => currentNode.id === nodeId) ??
+      null;
 
     if (!node || !flowRef.current) {
       return;
@@ -3022,7 +4663,7 @@ function Workspace() {
     const runId = ++animationRunRef.current;
     const reasoning = reasoningBundleFromGeneration(payload);
     const nextTokenGraph = createTokenGraphFromGeneration(payload);
-    setIsSentenceBarExpanded(true);
+    setIsSentenceBarExpanded(false);
     setTokenGraph(nextTokenGraph);
     tokenGraphRef.current = nextTokenGraph;
     const rootNode = buildPromptNode({
@@ -3608,7 +5249,8 @@ function Workspace() {
   ) {
     const node = nodesRef.current.find((currentNode) => currentNode.id === nodeId);
 
-    if (!node) {
+    if (!canMutateGraphTokenNode(node)) {
+      setErrorMessage("Prompt tokens are fixed input context and cannot branch into alternatives.");
       return false;
     }
 
@@ -3617,7 +5259,7 @@ function Workspace() {
       return false;
     }
 
-    if (node.data.kind === "token" && node.data.topAlternatives.length > 0) {
+    if (node.data.topAlternatives.length > 0) {
       return expandStoredAlternatives(nodeId, options);
     }
 
@@ -3632,7 +5274,12 @@ function Workspace() {
   ) {
     const node = nodesRef.current.find((currentNode) => currentNode.id === nodeId);
 
-    if (!node || node.data.status === "loading") {
+    if (!canMutateGraphTokenNode(node)) {
+      setErrorMessage("Prompt tokens are fixed input context and cannot continue generation.");
+      return false;
+    }
+
+    if (node.data.status === "loading") {
       return false;
     }
 
@@ -3842,6 +5489,13 @@ function Workspace() {
   }
 
   function openContinuationPreview(nodeId: string, steps: number) {
+    const node = nodesRef.current.find((currentNode) => currentNode.id === nodeId);
+
+    if (!canMutateGraphTokenNode(node)) {
+      setErrorMessage("Prompt tokens are fixed input context and cannot continue generation.");
+      return;
+    }
+
     const validation = buildContinuationValidation(tokenGraphRef.current, nodeId);
     setSelectedNodeId(nodeId);
     setContinuationPreview({
@@ -3952,7 +5606,7 @@ function Workspace() {
     setTypedCompletion("");
     setErrorMessage(null);
     setIsGenerating(true);
-    setIsSentenceBarExpanded(true);
+    setIsSentenceBarExpanded(false);
     setRequestVariation(nextVariation);
 
     try {
@@ -4009,6 +5663,7 @@ function Workspace() {
       (node) =>
         !node.hidden &&
         node.id !== "root" &&
+        node.data.kind === "token" &&
         node.data.providerCapabilities.supports_branching &&
         (node.data.topAlternatives.length > 0
           ? !node.data.alternativesExpanded
@@ -4190,10 +5845,16 @@ function Workspace() {
 
   const handleNodeContextMenu = useCallback((event: React.MouseEvent, node: TokenFlowNode) => {
     event.preventDefault();
+    if (node.data.kind === "prompt") {
+      setContextMenu(null);
+      setSelectedNodeId(node.id);
+      centerNodeRef.current(node.id);
+      return;
+    }
     setSelectedNodeId(node.id);
     setContextMenu({
       nodeId: node.id,
-      title: node.data.kind === "prompt" ? "Prompt" : node.data.displayTokenText,
+      title: node.data.displayTokenText,
       x: event.clientX,
       y: event.clientY,
     });
@@ -4201,6 +5862,12 @@ function Workspace() {
 
   const handleNodeClick = useCallback<NodeMouseHandler<TokenFlowNode>>((event, node) => {
     setContextMenu(null);
+
+    if (node.data.kind === "prompt") {
+      setSelectedNodeId(node.id);
+      centerNodeRef.current(node.id);
+      return;
+    }
 
     if (event.shiftKey && node.data.childCount > 0) {
       event.preventDefault();
@@ -4215,14 +5882,22 @@ function Workspace() {
   const handleNodeDoubleClick = useCallback<NodeMouseHandler<TokenFlowNode>>((event, node) => {
     event.preventDefault();
     setContextMenu(null);
-    if (!node.data.providerCapabilities.supports_branching) {
+    if (node.data.kind === "prompt" || !node.data.providerCapabilities.supports_branching) {
       return;
     }
     void expandNodeRef.current(node.id, { pushHistory: true });
   }, []);
 
-  const handleEdgesChange = useCallback((changes: EdgeChange<ProbabilityFlowEdge>[]) => {
-    const nextEdges = applyEdgeChanges<ProbabilityFlowEdge>(changes, edgesRef.current);
+  const handleEdgesChange = useCallback((changes: EdgeChange<CanvasFlowEdge>[]) => {
+    const probabilityChanges = changes.filter(
+      (change) => change.type !== "add" || change.item.type !== "attentionEdge",
+    ) as EdgeChange<ProbabilityFlowEdge>[];
+
+    if (probabilityChanges.length === 0) {
+      return;
+    }
+
+    const nextEdges = applyEdgeChanges<ProbabilityFlowEdge>(probabilityChanges, edgesRef.current);
     commitTransientEdges(nextEdges);
   }, [commitTransientEdges]);
 
@@ -4276,11 +5951,11 @@ function Workspace() {
     [setGraphInteractionActive],
   );
 
-  const handleNodeMouseEnter = useCallback((_event: React.MouseEvent, node: TokenFlowNode) => {
+  const handleNodeMouseEnter = useCallback<NodeMouseHandler<TokenFlowNode>>((_event, node) => {
     setHoveredNodeId(node.id);
   }, []);
 
-  const handleNodeMouseLeave = useCallback(() => {
+  const handleNodeMouseLeave = useCallback<NodeMouseHandler<TokenFlowNode>>(() => {
     setHoveredNodeId(null);
   }, []);
 
@@ -4332,6 +6007,7 @@ function Workspace() {
   const backgroundOpacity = Math.max(0.035, 0.16 - Math.max(viewport.zoom - 0.8, 0) * 0.06);
   const contextMenuNode =
     contextMenu ? displayNodes.find((node) => node.id === contextMenu.nodeId) ?? null : null;
+  const mutableContextMenuNode = canMutateGraphTokenNode(contextMenuNode) ? contextMenuNode : null;
   const contextMenuActions = contextMenu
     ? [
         {
@@ -4350,7 +6026,9 @@ function Workspace() {
         },
         {
           label: "Continue generation",
-          disabled: !contextMenuNode?.data.providerCapabilities.supports_continuation,
+          disabled:
+            !mutableContextMenuNode ||
+            !mutableContextMenuNode.data.providerCapabilities.supports_continuation,
           onSelect: () => {
             openContinuationPreview(contextMenu.nodeId, 1);
             setContextMenu(null);
@@ -4358,7 +6036,9 @@ function Workspace() {
         },
         {
           label: "Generate deeper",
-          disabled: !contextMenuNode?.data.providerCapabilities.supports_continuation,
+          disabled:
+            !mutableContextMenuNode ||
+            !mutableContextMenuNode.data.providerCapabilities.supports_continuation,
           onSelect: () => {
             openContinuationPreview(contextMenu.nodeId, 4);
             setContextMenu(null);
@@ -4387,7 +6067,9 @@ function Workspace() {
         },
         {
           label: "Expand futures",
-          disabled: !contextMenuNode?.data.providerCapabilities.supports_branching,
+          disabled:
+            !mutableContextMenuNode ||
+            !mutableContextMenuNode.data.providerCapabilities.supports_branching,
           onSelect: () => {
             void expandTokenOccurrence(contextMenu.nodeId, { pushHistory: true });
             setContextMenu(null);
@@ -4666,30 +6348,45 @@ function Workspace() {
       </div>
 
       <CurrentRealityPanel
+        attentionEnabled={attentionLensEnabled}
+        attentionHint={ATTENTION_LENS_TOOLTIP}
+        attentionTokens={currentRealityAttentionTokens}
+        branchBreadcrumb={currentRealityBranchBreadcrumb}
         collapsed={isSentenceBarCollapsed}
         continuationModeLabel={currentRealityContinuationMode.label}
         continuationModeTitle={currentRealityContinuationMode.title}
         continuationModeTone={currentRealityContinuationMode.tone}
+        conversationSections={currentRealityConversationSections}
+        copyConversationText={currentRealityConversationCopyText}
+        copyRawContextText={currentRealityRawContextText}
+        copyTokenIdsText={currentRealityTokenIdCopyText}
+        copyUserPromptText={currentRealityUserPromptCopyText}
+        detailItems={currentRealityDetailItems}
+        formattingSelection={currentRealityFormattingSelection}
         hasContent={hasSentenceContent}
         onSelectToken={(nodeId) => {
           activateReality(nodeId, { pushHistory: true });
           centerNode(nodeId);
         }}
         onToggleCollapse={() => setIsSentenceBarExpanded((currentValue) => !currentValue)}
+        onToggleAttentionPin={(tokenId) =>
+          handleAttentionSourceFocus(tokenId, attentionSourceEntryById.get(tokenId)?.graphNodeId ?? null)
+        }
         probabilityMode={probabilityViewMode}
         remainingProbabilityMass={
           activeSentenceNodes[activeSentenceNodes.length - 1]?.data.remainingProbabilityMass ?? 0
         }
-        selectedTokenId={
-          selectedNode && activeSentenceNodes.some((node) => node.id === selectedNode.id)
-            ? selectedNode.id
-            : null
-        }
+        promptTokenGroups={currentRealityPromptDisplayGroups}
+        rawContextText={currentRealityRawContextText}
+        selectedTokenId={selectedNode?.id ?? null}
+        summaryItems={currentRealitySummaryItems}
         stats={currentRealityStats}
         supportsEntropy={activeCapabilities.supports_entropy}
         supportsLogprobs={activeCapabilities.supports_logprobs}
         summary={
-          selectedNode?.data.kind === "prompt"
+          !hasSentenceContent
+            ? "System, user, and assistant context appear here after generation."
+            : selectedNode?.data.kind === "prompt"
             ? "Expand the prompt to see the first decision."
             : naturalReason
         }
@@ -4724,276 +6421,75 @@ function Workspace() {
         </div>
       ) : null}
 
-      <aside className={`explorer-dock${isDockCollapsed ? " explorer-dock--collapsed" : ""}`}>
-        <div className="explorer-dock__header">
-          <div>
-            <p className="explorer-dock__eyebrow">Generation</p>
-            <h1 className="explorer-dock__title">LLMScope</h1>
-            {!isDockCollapsed ? (
-              <p className="explorer-dock__subtitle">
-                Ask a prompt, then shrink this panel and explore why each token won.
-              </p>
-            ) : null}
-          </div>
-
-          <div className="explorer-dock__header-actions">
-            <button
-              className="icon-button"
-              onClick={() => void refreshHealth()}
-              type="button"
-            >
-              <RefreshCcw className={isCheckingHealth ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-            </button>
-            <button
-              className="icon-button"
-              onClick={() => setIsDockCollapsed((currentValue) => !currentValue)}
-              type="button"
-            >
-              {isDockCollapsed ? "+" : "-"}
-            </button>
-          </div>
-        </div>
-
-        {isDockCollapsed ? (
-          <div className="explorer-dock__collapsed-actions">
-            <button className="explorer-button explorer-button--primary" onClick={() => setIsDockCollapsed(false)} type="button">
-              Open
-            </button>
-            <button className="explorer-button explorer-button--ghost" onClick={() => void handleReplay()} type="button">
-              Replay
-            </button>
-            <button className="explorer-button explorer-button--ghost" onClick={handleResetView} type="button">
-              Fit
-            </button>
-          </div>
-        ) : (
-          <>
-            <textarea
-              aria-label="Prompt"
-              className="explorer-textarea"
-              onChange={(event) => {
-                setPrompt(event.target.value);
-                setErrorMessage(null);
-              }}
-              placeholder="Ask something"
-              value={prompt}
-            />
-
-            <select
-              aria-label="Provider"
-              className="explorer-input"
-              disabled={isLoadingModels}
-              onChange={(event) => {
-                handleProviderChange(event.target.value as ProviderId);
-              }}
-              value={selectedProvider}
-            >
-              {providers.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-
-            <div className="explorer-grid">
-              <select
-                aria-label="Model"
-                className="explorer-input"
-                disabled={isLoadingModels || filteredModels.length === 0}
-                onChange={(event) => {
-                  setModel(event.target.value);
-                  setErrorMessage(null);
-                }}
-                value={filteredModels.some((option) => option.id === model) ? model : ""}
-              >
-                {filteredModels.length === 0 ? <option value="">No models available</option> : null}
-                {filteredModels.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-
-              <select
-                aria-label="Mode"
-                className="explorer-input"
-                disabled={isLoadingModels}
-                onChange={(event) => {
-                  setPreset(event.target.value);
-                  setErrorMessage(null);
-                }}
-                value={preset}
-              >
-                {presets.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.label}
-                </option>
-              ))}
-            </select>
-          </div>
-
-            {selectedProviderStatusMessage && !showHuggingFaceControls ? (
-              <div className="explorer-note">
-                <p>{selectedProviderStatusMessage}</p>
-                {selectedProviderRecommendations.length > 0 ? (
-                  <p>{`Recommended models: ${selectedProviderRecommendations.join(", ")}`}</p>
-                ) : null}
-              </div>
-            ) : null}
-
-            {showHuggingFaceControls ? (
-              <div className="explorer-note">
-                <p>{selectedHuggingFaceStatusMessage ?? "Local analysis requires an explicit model load."}</p>
-                <div className="explorer-chip-row">
-                  <span className="explorer-chip">
-                    {`Status: ${selectedHuggingFaceModelStatus?.status ?? huggingFaceLocalStatus?.status ?? "checking"}`}
-                  </span>
-                  <span className="explorer-chip">
-                    {`Device: ${huggingFaceLocalStatus?.device ?? "Unavailable"}`}
-                  </span>
-                  <span className="explorer-chip">
-                    {`Precision: ${huggingFaceLocalStatus?.precision ?? "Unavailable"}`}
-                  </span>
-                  <span className="explorer-chip">
-                    {`VRAM free: ${formatVram(huggingFaceLocalStatus?.gpu_free_vram_gb)}`}
-                  </span>
-                </div>
-                <div className="explorer-grid explorer-grid--compact">
-                  <button
-                    className="explorer-button explorer-button--primary"
-                    disabled={
-                      isLoadingModels ||
-                      isLoadingHuggingFaceStatus ||
-                      isSubmittingHuggingFaceAction ||
-                      huggingFaceModelLoaded
-                    }
-                    onClick={() => void loadSelectedHuggingFaceModel()}
-                    type="button"
-                  >
-                    {isSubmittingHuggingFaceAction && !huggingFaceModelLoaded ? (
-                      <>
-                        <LoaderCircle className="h-4 w-4 animate-spin" />
-                        Loading...
-                      </>
-                    ) : (
-                      "Load model"
-                    )}
-                  </button>
-                  <button
-                    className="explorer-button explorer-button--ghost"
-                    disabled={
-                      isLoadingModels ||
-                      isLoadingHuggingFaceStatus ||
-                      isSubmittingHuggingFaceAction ||
-                      !huggingFaceLocalStatus?.active_model_id
-                    }
-                    onClick={() => void unloadHuggingFaceModel()}
-                    type="button"
-                  >
-                    Unload model
-                  </button>
-                </div>
-                <div className="explorer-grid explorer-grid--compact">
-                  <select
-                    aria-label="Token display"
-                    className="explorer-input"
-                    onChange={(event) => setTokenDisplayMode(event.target.value as TokenDisplayMode)}
-                    value={tokenDisplayMode}
-                  >
-                    <option value="decoded">Decoded tokens</option>
-                    <option value="raw">Raw tokens</option>
-                    <option value="token_id">Token IDs</option>
-                  </select>
-                  <div className="explorer-note">
-                    <p>
-                      {`Limits: ${huggingFaceLocalStatus?.limits.context_window_tokens ?? 0} ctx / ${huggingFaceLocalStatus?.limits.default_output_tokens ?? 0} default / ${huggingFaceLocalStatus?.limits.max_output_tokens ?? 0} max`}
-                    </p>
-                    {huggingFaceLocalStatus?.active_model_resolved_revision ? (
-                      <p>{`Revision: ${huggingFaceLocalStatus.active_model_resolved_revision}`}</p>
-                    ) : null}
-                  </div>
-                </div>
-              </div>
-            ) : null}
-
-            <div className="explorer-grid explorer-grid--compact">
-              <input
-                aria-label="Temperature"
-                className="explorer-input"
-                max={2}
-                min={0}
-                onChange={(event) => setTemperature(Number(event.target.value))}
-                step={0.1}
-                type="number"
-                value={temperature}
-              />
-
-              <input
-                aria-label="Top p"
-                className="explorer-input"
-                max={1}
-                min={0}
-                onChange={(event) => setTopP(Number(event.target.value))}
-                step={0.05}
-                type="number"
-                value={topP}
-              />
-            </div>
-
-            <div className="explorer-grid explorer-grid--compact">
-              <input
-                aria-label="Max tokens"
-                className="explorer-input"
-                max={4096}
-                min={1}
-                onChange={(event) => setMaxTokens(Number(event.target.value))}
-                type="number"
-                value={maxTokens}
-              />
-
-              <button
-                className="explorer-button explorer-button--primary"
-                disabled={isGenerating || isLoadingModels || !canGenerate}
-                onClick={() => void handleSubmit()}
-                type="button"
-              >
-                {isGenerating ? (
-                  <>
-                    <LoaderCircle className="h-4 w-4 animate-spin" />
-                    Generating...
-                  </>
-                ) : isLoadingModels ? (
-                  <>
-                    <LoaderCircle className="h-4 w-4 animate-spin" />
-                    Loading...
-                  </>
-                ) : (
-                  <>
-                    <Sparkles className="h-4 w-4" />
-                    Generate
-                  </>
-                )}
-              </button>
-            </div>
-
-            <div className="explorer-chip-row">
-              <span className="explorer-chip">{selectedProviderOption.label}</span>
-              <span className="explorer-chip">{generatedModelOption.label}</span>
-              <span className="explorer-chip">{generatedPresetOption.label}</span>
-              {generation?.request.demo_mode ? (
-                <span className="explorer-chip">Demo data</span>
-              ) : null}
-              <span className="explorer-chip">
-                {backendState === "online"
-                  ? "Online"
-                  : backendState === "offline"
-                    ? "Offline"
-                    : "Checking"}
-              </span>
-            </div>
-          </>
-        )}
-      </aside>
+      <GenerationPanel
+        backendState={backendState}
+        canGenerate={canGenerate}
+        collapsed={isDockCollapsed}
+        demoMode={demoMode}
+        filteredModels={filteredModels}
+        huggingFaceLocalStatus={huggingFaceLocalStatus}
+        isCheckingHealth={isCheckingHealth}
+        isGenerating={isGenerating}
+        isLoadingHuggingFaceStatus={isLoadingHuggingFaceStatus}
+        isLoadingModels={isLoadingModels}
+        isSubmittingHuggingFaceAction={isSubmittingHuggingFaceAction}
+        maxTokens={maxTokens}
+        model={model}
+        onApplyExample={(nextPrompt) => {
+          setPrompt(nextPrompt);
+          setErrorMessage(null);
+        }}
+        onClearPrompt={() => {
+          setPrompt("");
+          setErrorMessage(null);
+        }}
+        onGenerate={() => void handleSubmit()}
+        onLoadSelectedHuggingFaceModel={() => void loadSelectedHuggingFaceModel()}
+        onMaxTokensChange={(value) => {
+          setMaxTokens(value);
+          setErrorMessage(null);
+        }}
+        onModelChange={(value) => {
+          setModel(value);
+          setErrorMessage(null);
+        }}
+        onPresetChange={(value) => {
+          setPreset(value);
+          setErrorMessage(null);
+        }}
+        onPromptChange={(value) => {
+          setPrompt(value);
+          setErrorMessage(null);
+        }}
+        onProviderChange={(value) => {
+          handleProviderChange(value);
+        }}
+        onRefreshHealth={() => void refreshHealth()}
+        onSetDemoMode={(value) => setDemoMode(value)}
+        onTemperatureChange={(value) => setTemperature(value)}
+        onToggleCollapsed={() => setIsDockCollapsed((currentValue) => !currentValue)}
+        onTopPChange={(value) => setTopP(value)}
+        onTokenDisplayModeChange={(value) => setTokenDisplayMode(value)}
+        onUnloadHuggingFaceModel={() => void unloadHuggingFaceModel()}
+        preset={preset}
+        presets={presets}
+        prompt={prompt}
+        providerStatusMessage={
+          showHuggingFaceControls
+            ? selectedHuggingFaceStatusMessage
+            : selectedProviderStatusMessage
+        }
+        providerRecommendations={selectedProviderRecommendations}
+        providers={providers}
+        selectedCapabilities={selectedCapabilities}
+        selectedHuggingFaceModelStatus={selectedHuggingFaceModelStatus}
+        selectedProvider={selectedProvider}
+        showHuggingFaceControls={showHuggingFaceControls}
+        systemPromptState={systemPromptState}
+        temperature={temperature}
+        tokenDisplayMode={tokenDisplayMode}
+        topP={topP}
+      />
 
       <aside className="inspector-panel">
         <div className="inspector-panel__header">
@@ -5007,10 +6503,12 @@ function Workspace() {
           </div>
         </div>
 
-        {selectedNode && selectedRecord ? (
+        {selectedNode ? (
           <div className="inspector-panel__content">
             <div className="inspector-section">
-              <p className="inspector-section__label">Basic</p>
+              <p className="inspector-section__label">
+                {isSelectedPromptToken ? "Prompt token" : "Basic"}
+              </p>
               <div className="inspector-grid-data">
                 <div>
                   <dt>Chosen token</dt>
@@ -5019,15 +6517,19 @@ function Workspace() {
                 <div>
                   <dt>Probability</dt>
                   <dd>
-                    {selectedNode.data.providerCapabilities.supports_logprobs
+                    {isSelectedPromptToken
+                      ? "Input token"
+                      : selectedNode.data.providerCapabilities.supports_logprobs
                       ? formatPercent(selectedNode.data.displayProbability)
                       : "Unavailable"}
                   </dd>
                 </div>
                 <div>
-                  <dt>Mode</dt>
+                  <dt>{isSelectedPromptToken ? "Category" : "Mode"}</dt>
                   <dd>
-                    {selectedNode.data.providerCapabilities.supports_logprobs
+                    {isSelectedPromptToken
+                      ? selectedNode.data.sourceLabel
+                      : selectedNode.data.providerCapabilities.supports_logprobs
                       ? getProbabilityModeLabel(probabilityViewMode)
                       : "Unavailable"}
                   </dd>
@@ -5035,34 +6537,44 @@ function Workspace() {
                 <div>
                   <dt>Continuation</dt>
                   <dd>
-                    <span
-                      className={`inspector-inline-badge inspector-inline-badge--${inspectorContinuationMode.tone}`}
-                      title={inspectorContinuationMode.title ?? undefined}
-                    >
-                      {`Mode: ${inspectorContinuationMode.label}`}
-                    </span>
+                    {isSelectedPromptToken ? (
+                      <span className="inspector-inline-badge">Input context</span>
+                    ) : (
+                      <span
+                        className={`inspector-inline-badge inspector-inline-badge--${inspectorContinuationMode.tone}`}
+                        title={inspectorContinuationMode.title ?? undefined}
+                      >
+                        {`Mode: ${inspectorContinuationMode.label}`}
+                      </span>
+                    )}
                   </dd>
                 </div>
                 <div>
-                  <dt>Rank</dt>
-                  <dd>{selectedRecord.rank}</dd>
+                  <dt>{isSelectedPromptToken ? "Position" : "Rank"}</dt>
+                  <dd>{isSelectedPromptToken ? selectedNode.data.tokenIndex : (selectedRecord?.rank ?? "-")}</dd>
                 </div>
                 <div>
-                  <dt>Entropy</dt>
+                  <dt>{isSelectedPromptToken ? "Special token" : "Entropy"}</dt>
                   <dd>
-                    {selectedNode.data.providerCapabilities.supports_entropy
-                      ? formatNumber(selectedRecord.entropy)
+                    {isSelectedPromptToken
+                      ? selectedNode.data.specialToken
+                        ? "Yes"
+                        : "No"
+                      : selectedNode.data.providerCapabilities.supports_entropy
+                      ? formatNumber(selectedRecord?.entropy)
                       : "Unavailable"}
                   </dd>
                 </div>
                 <div>
-                  <dt>Latency</dt>
-                  <dd>{`${selectedRecord.latencyMs} ms`}</dd>
+                  <dt>{isSelectedPromptToken ? "Token id" : "Latency"}</dt>
+                  <dd>{isSelectedPromptToken ? (selectedNode.data.tokenId ?? "-") : `${selectedRecord?.latencyMs ?? 0} ms`}</dd>
                 </div>
                 <div>
-                  <dt>Top-K coverage</dt>
+                  <dt>{isSelectedPromptToken ? "Scope" : "Top-K coverage"}</dt>
                   <dd>
-                    {selectedNode.data.providerCapabilities.supports_branching
+                    {isSelectedPromptToken
+                      ? getPromptCategoryLabel(selectedNode.data.sourceCategory)
+                      : selectedNode.data.providerCapabilities.supports_branching
                       ? inspectorAlternatives.length > 0
                         ? formatPercent(inspectorCoverage)
                         : "-"
@@ -5075,39 +6587,389 @@ function Workspace() {
                 </div>
                 <div>
                   <dt>Model</dt>
-                  <dd>{selectedNode.data.requestModel}</dd>
+                  <dd>{selectedNode.data.requestModel || generation?.request.model || "Unavailable"}</dd>
                 </div>
               </div>
             </div>
 
             <div className="inspector-section">
-              <p className="inspector-section__label">Context</p>
+              <p className="inspector-section__label">
+                {isSelectedPromptToken ? "Token metadata" : "Context"}
+              </p>
               <div className="inspector-block inspector-block--stack">
-                <p>
-                  <strong>Before token</strong>
-                  <span>{selectedRecord.contextBefore || "<empty>"}</span>
-                </p>
-                <p>
-                  <strong>Through token</strong>
-                  <span>{selectedRecord.cumulativeDecodedText || "<empty>"}</span>
-                </p>
-                <p>
-                  <strong>Interpretation</strong>
-                  <span>{naturalReason}</span>
-                </p>
+                {isSelectedPromptToken ? (
+                  <>
+                    <p>
+                      <strong>Raw token</strong>
+                      <span>{selectedNode.data.tokenText || "<empty>"}</span>
+                    </p>
+                    <p>
+                      <strong>Decoded contribution</strong>
+                      <span>{selectedNode.data.decodedContribution || "<empty>"}</span>
+                    </p>
+                    <p>
+                      <strong>Source</strong>
+                      <span>{selectedNode.data.sourceLabel}</span>
+                    </p>
+                    <p>
+                      <strong>Canonical position</strong>
+                      <span>{selectedNode.data.tokenIndex}</span>
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p>
+                      <strong>Before token</strong>
+                      <span>{selectedRecord?.contextBefore || "<empty>"}</span>
+                    </p>
+                    <p>
+                      <strong>Through token</strong>
+                      <span>{selectedRecord?.cumulativeDecodedText || "<empty>"}</span>
+                    </p>
+                    <p>
+                      <strong>Interpretation</strong>
+                      <span>{naturalReason}</span>
+                    </p>
+                  </>
+                )}
               </div>
             </div>
+
+            {showAttentionInspectorSection ? (
+              <div className="inspector-section">
+                <div className="inspector-section__heading">
+                  <p className="inspector-section__label">Attention Lens</p>
+                  <div className="inspector-section__meta">
+                    <span className="inspector-inline-badge" title={ATTENTION_LENS_TOOLTIP}>
+                      {attentionAnalysisMode === "representation" ? "Representation" : "Prediction"}
+                    </span>
+                    <span className="inspector-inline-badge">
+                      Layer {effectiveAttentionLayer}
+                    </span>
+                  </div>
+                </div>
+                <div className="inspector-block inspector-block--stack">
+                  <div className="attention-controls__row">
+                    <button
+                      className={`explorer-button${
+                        attentionLensEnabled ? " explorer-button--primary" : " explorer-button--ghost"
+                      }`}
+                      disabled={!attentionAvailable}
+                      onClick={() => toggleAttentionLens()}
+                      type="button"
+                    >
+                      {attentionLensEnabled ? "Clear attention" : "Enable Attention Lens"}
+                    </button>
+                    <button
+                      className="explorer-button explorer-button--ghost"
+                      disabled={!promptTokensAvailable}
+                      onClick={() => togglePromptTokens()}
+                      title={promptTokensUnavailableReason ?? undefined}
+                      type="button"
+                    >
+                      {promptTokensVisible ? "Hide prompt tokens" : "Show prompt tokens"}
+                    </button>
+                    {attentionLensEnabled ? (
+                      <button
+                        className="explorer-button explorer-button--ghost"
+                        disabled={!canFocusAttention}
+                        onClick={() => {
+                          void focusAttentionNeighborhood();
+                        }}
+                        type="button"
+                      >
+                        Focus attention
+                      </button>
+                    ) : null}
+                    {attentionLoading ? (
+                      <button
+                        className="explorer-button explorer-button--ghost"
+                        onClick={() => attentionAbortRef.current?.abort()}
+                        type="button"
+                      >
+                        Cancel
+                      </button>
+                    ) : null}
+                  </div>
+
+                  {!attentionLensEnabled && attentionUnavailableMessage ? (
+                    <div className="inspector-empty">{attentionUnavailableMessage}</div>
+                  ) : null}
+
+                  {attentionLensEnabled ? (
+                    <>
+                      <div className="attention-summary">
+                        <p className="attention-summary__title">{attentionHeadline}</p>
+                        <p className="attention-controls__hint" title={ATTENTION_LENS_TOOLTIP}>
+                          {ATTENTION_LENS_TOOLTIP}
+                        </p>
+                      </div>
+                      <p className="attention-controls__hint attention-controls__hint--muted">
+                        Temporary eager attention may run more slowly on local Qwen models.
+                      </p>
+
+                      {attentionLoading ? (
+                        <div className="inspector-empty">Computing attention...</div>
+                      ) : null}
+                      {attentionError ? (
+                        <div className="inspector-empty">{attentionError}</div>
+                      ) : null}
+                      {!attentionAnalysis && attentionUnavailableMessage ? (
+                        <div className="inspector-empty">{attentionUnavailableMessage}</div>
+                      ) : null}
+                      {attentionAnalysis ? (
+                        <>
+                          <div className="attention-legend">
+                            <span className="attention-legend__item">
+                              <span className="attention-legend__swatch attention-legend__swatch--arc" />
+                              {attentionHeadLabel}
+                            </span>
+                            <span className="attention-legend__item">{attentionModeDescription}</span>
+                            <span className="attention-legend__item">
+                              {attentionAnalysis.truncated_context
+                                ? `Truncated ${attentionAnalysis.analyzed_context_length}/${attentionAnalysis.original_full_context_length}`
+                                : `${attentionAnalysis.analyzed_context_length} analyzed tokens`}
+                            </span>
+                          </div>
+                          <div className="attention-breakdown">
+                            <span className="inspector-inline-badge">
+                              Prompt attention {formatPercent(attentionMassBreakdown.prompt)}
+                            </span>
+                            <span className="inspector-inline-badge">
+                              Earlier output {formatPercent(attentionMassBreakdown.generatedOutput)}
+                            </span>
+                            <span className="inspector-inline-badge">
+                              Template/control {formatPercent(attentionMassBreakdown.template)}
+                            </span>
+                            <span className="inspector-inline-badge">
+                              Top N coverage {formatPercent(attentionAnalysis.top_n_coverage)}
+                            </span>
+                          </div>
+                          <p className="attention-source-list__summary">
+                            {`${attentionSourceEntries.length} ranked sources · ${visibleAttentionSourceCount} visible`}
+                          </p>
+                          <div className="alternatives-list attention-source-list">
+                            {attentionSourceEntries.map(({ graphNodeId, isCanvasNodeUnavailable, source, sourceId }) => (
+                              <button
+                                key={sourceId}
+                                className={`alternative-row attention-source-row${
+                                  pinnedAttentionSourceIdSet.has(sourceId)
+                                    ? " attention-source-row--active"
+                                    : ""
+                                }`}
+                                onClick={() => handleAttentionSourceFocus(sourceId, graphNodeId)}
+                                type="button"
+                              >
+                                <span className="alternative-row__token">
+                                  {`${source.rank}. ${source.display_token || source.raw_token}`}
+                                </span>
+                                <span className="alternative-row__probability">
+                                  {formatPercent(source.attention_weight)}
+                                </span>
+                                <span className="attention-source-row__meta">
+                                  {isCanvasNodeUnavailable
+                                    ? "Source node unavailable on canvas"
+                                    : `${source.source_label} · pos ${source.full_position}`}
+                                </span>
+                                <span className="attention-source-row__bar">
+                                  <span
+                                    className="attention-source-row__bar-fill"
+                                    style={{ width: `${Math.max(source.attention_weight * 100, 4)}%` }}
+                                  />
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      ) : null}
+
+                      <details
+                        className="inspector-details"
+                        onToggle={(event) =>
+                          setAttentionAdvancedOpen((event.currentTarget as HTMLDetailsElement).open)
+                        }
+                        open={attentionAdvancedOpen}
+                      >
+                        <summary>Advanced</summary>
+                        <div className="attention-controls__grid">
+                          <label className="attention-controls__label">
+                            <span>Mode</span>
+                            <select
+                              className="explorer-select"
+                              disabled={attentionLoading}
+                              onChange={(event) =>
+                                setAttentionAnalysisMode(
+                                  event.target.value as HuggingFaceAttentionAnalysisMode,
+                                )
+                              }
+                              value={attentionAnalysisMode}
+                            >
+                              <option value="prediction">Prediction attention</option>
+                              <option value="representation">Representation attention</option>
+                            </select>
+                          </label>
+                          <label className="attention-controls__label">
+                            <span>Top sources</span>
+                            <select
+                              className="explorer-select"
+                              disabled={attentionLoading}
+                              onChange={(event) => {
+                                const nextValue = event.target.value;
+                                if (nextValue === "all") {
+                                  setShowAllAttentionTokens(true);
+                                } else {
+                                  setShowAllAttentionTokens(false);
+                                  setAttentionTopN(Number(nextValue));
+                                }
+                              }}
+                              value={showAllAttentionTokens ? "all" : String(attentionTopN)}
+                            >
+                              <option value="5">Top 5</option>
+                              <option value="8">Top 8</option>
+                              <option value="12">Top 12</option>
+                              <option value="20">Top 20</option>
+                              {canShowAllAttentionTokens ? <option value="all">All analyzed</option> : null}
+                            </select>
+                          </label>
+                        </div>
+                        <div className="attention-controls__row attention-controls__row--dense">
+                          <button
+                            className="icon-button"
+                            disabled={attentionLoading || effectiveAttentionLayer <= 0}
+                            onClick={() =>
+                              setAttentionLayer((currentValue) =>
+                                Math.max((currentValue ?? attentionDefaultLayer) - 1, 0),
+                              )
+                            }
+                            type="button"
+                          >
+                            <ChevronLeft className="h-4 w-4" />
+                          </button>
+                          <label className="attention-controls__label">
+                            <span>Layer</span>
+                            <select
+                              className="explorer-select"
+                              disabled={attentionLoading || attentionLayerCount <= 0}
+                              onChange={(event) => setAttentionLayer(Number(event.target.value))}
+                              value={effectiveAttentionLayer}
+                            >
+                              {Array.from({ length: Math.max(attentionLayerCount, 1) }, (_, index) => (
+                                <option key={index} value={index}>
+                                  {index}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <button
+                            className="icon-button"
+                            disabled={
+                              attentionLoading ||
+                              attentionLayerCount <= 0 ||
+                              effectiveAttentionLayer >= Math.max(attentionLayerCount - 1, 0)
+                            }
+                            onClick={() =>
+                              setAttentionLayer((currentValue) =>
+                                Math.min(
+                                  (currentValue ?? attentionDefaultLayer) + 1,
+                                  Math.max(attentionLayerCount - 1, 0),
+                                ),
+                              )
+                            }
+                            type="button"
+                          >
+                            <ChevronRight className="h-4 w-4" />
+                          </button>
+                        </div>
+                        <div className="attention-controls__grid">
+                          <label className="attention-controls__label">
+                            <span>Head mode</span>
+                            <select
+                              className="explorer-select"
+                              disabled={attentionLoading}
+                              onChange={(event) => {
+                                const nextMode = event.target.value as HuggingFaceAttentionAggregationMode;
+                                setAttentionAggregationMode(nextMode);
+                                if (nextMode !== "single_head") {
+                                  setAttentionHeadIndex(0);
+                                }
+                              }}
+                              value={attentionAggregationMode}
+                            >
+                              <option value="average_heads">Average heads</option>
+                              <option value="max_heads">Max heads</option>
+                              <option value="single_head">Single head</option>
+                            </select>
+                          </label>
+                          <label className="attention-controls__label">
+                            <span>Implementation</span>
+                            <span className="attention-controls__static">
+                              {huggingFaceLocalStatus?.active_model_attention_implementation ?? "sdpa -> eager"}
+                            </span>
+                          </label>
+                        </div>
+                        {attentionAggregationMode === "single_head" ? (
+                          <div className="attention-controls__row attention-controls__row--dense">
+                            <button
+                              className="icon-button"
+                              disabled={attentionLoading || attentionHeadIndex <= 0}
+                              onClick={() => setAttentionHeadIndex((currentValue) => Math.max(currentValue - 1, 0))}
+                              type="button"
+                            >
+                              <ChevronLeft className="h-4 w-4" />
+                            </button>
+                            <label className="attention-controls__label">
+                              <span>Head</span>
+                              <select
+                                className="explorer-select"
+                                disabled={attentionLoading || attentionHeadCount <= 0}
+                                onChange={(event) => setAttentionHeadIndex(Number(event.target.value))}
+                                value={attentionHeadIndex}
+                              >
+                                {Array.from({ length: Math.max(attentionHeadCount, 1) }, (_, index) => (
+                                  <option key={index} value={index}>
+                                    {index}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <button
+                              className="icon-button"
+                              disabled={
+                                attentionLoading ||
+                                attentionHeadCount <= 0 ||
+                                attentionHeadIndex >= Math.max(attentionHeadCount - 1, 0)
+                              }
+                              onClick={() =>
+                                setAttentionHeadIndex((currentValue) =>
+                                  Math.min(currentValue + 1, Math.max(attentionHeadCount - 1, 0)),
+                                )
+                              }
+                              type="button"
+                            >
+                              <ChevronRight className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ) : null}
+                      </details>
+                    </>
+                  ) : attentionUnavailableMessage ? (
+                    <div className="inspector-empty">{attentionUnavailableMessage}</div>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
 
             <div className="inspector-section">
               <div className="inspector-section__heading">
                 <p className="inspector-section__label">Top alternatives</p>
                 <div className="inspector-section__meta">
-                  {selectedNode.data.providerCapabilities.supports_logprobs ? (
+                  {!isSelectedPromptToken && selectedNode.data.providerCapabilities.supports_logprobs ? (
                     <span className="inspector-inline-badge">
                       {getProbabilityModeLabel(probabilityViewMode)}
                     </span>
                   ) : null}
-                  {selectedNode.data.providerCapabilities.supports_logprobs &&
+                  {!isSelectedPromptToken &&
+                  selectedNode.data.providerCapabilities.supports_logprobs &&
                   probabilityViewMode === "raw" ? (
                     <span className="inspector-inline-badge">
                       Other tokens {formatPercent(inspectorRemainingProbabilityMass)}
@@ -5115,7 +6977,11 @@ function Workspace() {
                   ) : null}
                 </div>
               </div>
-              {inspectorAlternatives.length > 0 ? (
+              {isSelectedPromptToken ? (
+                <div className="inspector-empty">
+                  Prompt tokens are fixed input context. They do not expose sampled alternatives.
+                </div>
+              ) : inspectorAlternatives.length > 0 ? (
                 <div className="alternatives-list">
                   {inspectorAlternatives.map((alternative) => (
                     <button
@@ -5147,109 +7013,171 @@ function Workspace() {
               )}
             </div>
 
-            <details className="inspector-details" open={false}>
-              <summary>Advanced</summary>
-              <div className="inspector-section">
-                <div className="inspector-grid-data">
-                  <div>
-                    <dt>Raw token</dt>
-                    <dd>{selectedRecord.rawToken || "∅"}</dd>
+            {isSelectedPromptToken ? (
+              <details className="inspector-details" open={false}>
+                <summary>Advanced</summary>
+                <div className="inspector-section">
+                  <div className="inspector-grid-data">
+                    <div>
+                      <dt>Raw token</dt>
+                      <dd>{selectedNode.data.tokenText || "∅"}</dd>
+                    </div>
+                    <div>
+                      <dt>Decoded token</dt>
+                      <dd>{selectedNode.data.decodedContribution || "∅"}</dd>
+                    </div>
+                    <div>
+                      <dt>Token id</dt>
+                      <dd>{selectedNode.data.tokenId ?? "-"}</dd>
+                    </div>
+                    <div>
+                      <dt>Tokenizer id</dt>
+                      <dd>{selectedNode.data.tokenizerId ?? "-"}</dd>
+                    </div>
+                    <div>
+                      <dt>Canonical position</dt>
+                      <dd>{selectedNode.data.tokenIndex}</dd>
+                    </div>
+                    <div>
+                      <dt>Source category</dt>
+                      <dd>{getPromptCategoryLabel(selectedNode.data.sourceCategory)}</dd>
+                    </div>
+                    <div>
+                      <dt>UTF-8 length</dt>
+                      <dd>{selectedNodeMetrics?.utf8Length ?? 0}</dd>
+                    </div>
+                    <div>
+                      <dt>Leading whitespace</dt>
+                      <dd>{selectedNodeMetrics?.leadingWhitespaceCount ?? 0}</dd>
+                    </div>
+                    <div>
+                      <dt>Trailing whitespace</dt>
+                      <dd>{selectedNodeMetrics?.trailingWhitespaceCount ?? 0}</dd>
+                    </div>
                   </div>
-                  <div>
-                    <dt>Decoded token</dt>
-                    <dd>{selectedRecord.decodedContribution || "∅"}</dd>
-                  </div>
-                  <div>
-                    <dt>Token id</dt>
-                    <dd>{selectedRecord.tokenId ?? "-"}</dd>
-                  </div>
-                  <div>
-                    <dt>Tokenizer id</dt>
-                    <dd>{selectedRecord.tokenizerId ?? "-"}</dd>
-                  </div>
-                  <div>
-                    <dt>Raw probability</dt>
-                    <dd>
-                      {selectedNode.data.providerCapabilities.supports_logprobs
-                        ? formatProbability(selectedRecord.rawProbability)
-                        : "Unavailable"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Log probability</dt>
-                    <dd>
-                      {selectedNode.data.providerCapabilities.supports_logprobs
-                        ? formatNumber(selectedRecord.logProbability)
-                        : "Unavailable"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Cumulative probability</dt>
-                    <dd>
-                      {selectedNode.data.providerCapabilities.supports_logprobs
-                        ? formatProbability(selectedRecord.cumulativeProbability)
-                        : "Unavailable"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Cumulative logprob</dt>
-                    <dd>
-                      {selectedNode.data.providerCapabilities.supports_logprobs
-                        ? formatNumber(selectedRecord.cumulativeLogProbability)
-                        : "Unavailable"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Branch depth</dt>
-                    <dd>{selectedRecord.generationDepth}</dd>
-                  </div>
-                  <div>
-                    <dt>Parent id</dt>
-                    <dd>{selectedRecord.parentId ?? "-"}</dd>
-                  </div>
-                  <div>
-                    <dt>Generation step</dt>
-                    <dd>{selectedRecord.generationStep}</dd>
-                  </div>
-                  <div>
-                    <dt>Segment id</dt>
-                    <dd>{selectedRecord.segmentId ?? "-"}</dd>
-                  </div>
-                  <div>
-                    <dt>UTF-8 length</dt>
-                    <dd>{selectedNodeMetrics?.utf8Length ?? 0}</dd>
-                  </div>
-                  <div>
-                    <dt>Leading whitespace</dt>
-                    <dd>{selectedNodeMetrics?.leadingWhitespaceCount ?? 0}</dd>
-                  </div>
-                  <div>
-                    <dt>Trailing whitespace</dt>
-                    <dd>{selectedNodeMetrics?.trailingWhitespaceCount ?? 0}</dd>
+                  <div className="inspector-block inspector-block--stack">
+                    <p>
+                      <strong>Byte representation</strong>
+                      <span>{selectedNode.data.tokenBytes.length > 0 ? selectedNode.data.tokenBytes.join(" ") : "Unavailable"}</span>
+                    </p>
+                    <p>
+                      <strong>Metadata</strong>
+                      <span>
+                        {Object.entries(selectedNode.data.metadata).length > 0
+                          ? Object.entries(selectedNode.data.metadata)
+                              .map(([key, value]) => `${key}: ${String(value)}`)
+                              .join(" · ")
+                          : "Unavailable"}
+                      </span>
+                    </p>
                   </div>
                 </div>
-                <div className="inspector-block inspector-block--stack">
-                  <p>
-                    <strong>Byte representation</strong>
-                    <span>{selectedRecord.tokenBytes.length > 0 ? selectedRecord.tokenBytes.join(" ") : "Unavailable"}</span>
-                  </p>
-                  <p>
-                    <strong>Metadata</strong>
-                    <span>
-                      {Object.entries(selectedRecord.metadata).length > 0
-                        ? Object.entries(selectedRecord.metadata)
-                            .map(([key, value]) => `${key}: ${String(value)}`)
-                            .join(" · ")
-                        : "Unavailable"}
-                    </span>
-                  </p>
-                  <p>
-                    <strong>Notes</strong>
-                    <span>{selectedNode.data.sourceNotes || "Unavailable"}</span>
-                  </p>
+              </details>
+            ) : (
+              <details className="inspector-details" open={false}>
+                <summary>Advanced</summary>
+                <div className="inspector-section">
+                  <div className="inspector-grid-data">
+                    <div>
+                      <dt>Raw token</dt>
+                      <dd>{selectedRecord?.rawToken || "∅"}</dd>
+                    </div>
+                    <div>
+                      <dt>Decoded token</dt>
+                      <dd>{selectedRecord?.decodedContribution || "∅"}</dd>
+                    </div>
+                    <div>
+                      <dt>Token id</dt>
+                      <dd>{selectedRecord?.tokenId ?? "-"}</dd>
+                    </div>
+                    <div>
+                      <dt>Tokenizer id</dt>
+                      <dd>{selectedRecord?.tokenizerId ?? "-"}</dd>
+                    </div>
+                    <div>
+                      <dt>Raw probability</dt>
+                      <dd>
+                        {selectedNode.data.providerCapabilities.supports_logprobs
+                          ? formatProbability(selectedRecord?.rawProbability)
+                          : "Unavailable"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Log probability</dt>
+                      <dd>
+                        {selectedNode.data.providerCapabilities.supports_logprobs
+                          ? formatNumber(selectedRecord?.logProbability)
+                          : "Unavailable"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Cumulative probability</dt>
+                      <dd>
+                        {selectedNode.data.providerCapabilities.supports_logprobs
+                          ? formatProbability(selectedRecord?.cumulativeProbability)
+                          : "Unavailable"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Cumulative logprob</dt>
+                      <dd>
+                        {selectedNode.data.providerCapabilities.supports_logprobs
+                          ? formatNumber(selectedRecord?.cumulativeLogProbability)
+                          : "Unavailable"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Branch depth</dt>
+                      <dd>{selectedRecord?.generationDepth ?? selectedNode.data.depth}</dd>
+                    </div>
+                    <div>
+                      <dt>Parent id</dt>
+                      <dd>{selectedRecord?.parentId ?? "-"}</dd>
+                    </div>
+                    <div>
+                      <dt>Generation step</dt>
+                      <dd>{selectedRecord?.generationStep ?? "-"}</dd>
+                    </div>
+                    <div>
+                      <dt>Segment id</dt>
+                      <dd>{selectedRecord?.segmentId ?? "-"}</dd>
+                    </div>
+                    <div>
+                      <dt>UTF-8 length</dt>
+                      <dd>{selectedNodeMetrics?.utf8Length ?? 0}</dd>
+                    </div>
+                    <div>
+                      <dt>Leading whitespace</dt>
+                      <dd>{selectedNodeMetrics?.leadingWhitespaceCount ?? 0}</dd>
+                    </div>
+                    <div>
+                      <dt>Trailing whitespace</dt>
+                      <dd>{selectedNodeMetrics?.trailingWhitespaceCount ?? 0}</dd>
+                    </div>
+                  </div>
+                  <div className="inspector-block inspector-block--stack">
+                    <p>
+                      <strong>Byte representation</strong>
+                      <span>{selectedRecord?.tokenBytes.length ? selectedRecord.tokenBytes.join(" ") : "Unavailable"}</span>
+                    </p>
+                    <p>
+                      <strong>Metadata</strong>
+                      <span>
+                        {selectedRecord && Object.entries(selectedRecord.metadata).length > 0
+                          ? Object.entries(selectedRecord.metadata)
+                              .map(([key, value]) => `${key}: ${String(value)}`)
+                              .join(" · ")
+                          : "Unavailable"}
+                      </span>
+                    </p>
+                    <p>
+                      <strong>Notes</strong>
+                      <span>{selectedNode.data.sourceNotes || "Unavailable"}</span>
+                    </p>
+                  </div>
                 </div>
-              </div>
-            </details>
+              </details>
+            )}
 
             {pinnedNodeIds.length > 0 ? (
               <div className="inspector-section">
@@ -5295,12 +7223,12 @@ function Workspace() {
         click to switch reality • double-click to expand • shift+click to collapse • cmd/ctrl+f to search • drag the canvas to pan
       </div>
 
-      <ReactFlow<TokenFlowNode, ProbabilityFlowEdge>
+      <ReactFlow<TokenFlowNode, CanvasFlowEdge>
         className={isGraphInteracting ? "llmscope-flow llmscope-flow--interacting" : "llmscope-flow"}
         colorMode="dark"
         defaultEdgeOptions={DEFAULT_EDGE_OPTIONS}
         edgeTypes={edgeTypes}
-        edges={displayEdges}
+        edges={renderEdges}
         fitView
         fitViewOptions={FIT_VIEW_OPTIONS}
         maxZoom={1.9}

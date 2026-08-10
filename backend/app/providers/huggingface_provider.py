@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import math
 import platform
+import re
 import shutil
 import sys
 import threading
 import zlib
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -20,8 +23,20 @@ from app.providers.base import (
     ProviderCapabilities,
     ProviderDiscoveryResult,
 )
-from app.schemas.generation import AlternativeCandidate, TokenTrace
+from app.schemas.generation import (
+    AlternativeCandidate,
+    CanonicalPromptToken,
+    CanonicalTokenSourceCategory,
+    TokenTrace,
+)
 from app.schemas.huggingface_local import (
+    HuggingFaceAttentionAggregationMode,
+    HuggingFaceAttentionAnalysisMode,
+    HuggingFaceAttentionRequest,
+    HuggingFaceAttentionResponse,
+    HuggingFaceAttentionSequenceScope,
+    HuggingFaceAttentionSource,
+    HuggingFaceAttentionTokenInfo,
     HuggingFaceLocalDiagnosticsResponse,
     HuggingFaceLocalLimits,
     HuggingFaceLocalModelStatus,
@@ -72,7 +87,7 @@ HUGGING_FACE_LOCAL_CAPABILITIES = ProviderCapabilities(
     supports_native_continuation=True,
     minimum_output_tokens=1,
     supports_entropy=True,
-    supports_attention=False,
+    supports_attention=True,
     supports_streaming=False,
     supports_branching=True,
     supports_continuation=True,
@@ -80,7 +95,7 @@ HUGGING_FACE_LOCAL_CAPABILITIES = ProviderCapabilities(
 HUGGING_FACE_LOCAL_CAPABILITIES_DETAIL = ProviderCapabilitiesDetail(
     supports_logprobs=True,
     supports_entropy=True,
-    supports_attention=False,
+    supports_attention=True,
     supports_exact_continuation=True,
     supports_streaming=False,
     supports_branching=True,
@@ -100,6 +115,9 @@ HUGGING_FACE_LOCAL_CUDA_UNAVAILABLE_MESSAGE = (
 LOCAL_TOP_P_EPSILON = 1e-8
 MIN_PROBABILITY = 1e-12
 RECOMMENDED_3B_FREE_VRAM_GB = 8.5
+DEFAULT_ATTENTION_CONTEXT_LIMIT = 256
+MAX_ATTENTION_CONTEXT_LIMIT = 512
+ATTENTION_CACHE_SIZE = 48
 
 
 @dataclass(frozen=True)
@@ -119,14 +137,34 @@ class LoadedLocalRuntime:
     model: Any
     device: str
     dtype: str
+    num_hidden_layers: int | None
+    num_attention_heads: int | None
+    attention_implementation: str | None
+
+
+@dataclass(frozen=True)
+class RenderedChatMessage:
+    role: str
+    content: str
+
+
+@dataclass(frozen=True)
+class CanonicalPromptBuildResult:
+    prompt_ids: list[int]
+    prompt_tokens: list[CanonicalPromptToken]
+    raw_context_text: str | None
+    system_prompt: str | None
 
 
 @dataclass(frozen=True)
 class HuggingFaceGenerationResult:
     completion: str
     prompt_token_ids: list[int] | None
+    prompt_tokens: list[CanonicalPromptToken] | None
+    raw_context_text: str | None
+    system_prompt: str | None
     tokens: list[TokenTrace]
-    prompt_tokens: int
+    prompt_token_count: int
     completion_tokens: int
     total_tokens: int
     latency_ms: int
@@ -248,6 +286,8 @@ class HuggingFaceLocalProvider(LLMProvider):
         self._runtime_lock = threading.RLock()
         self._load_lock = threading.Lock()
         self._busy_lock = threading.Lock()
+        self._attention_cache: OrderedDict[str, HuggingFaceAttentionResponse] = OrderedDict()
+        self._attention_cache_lock = threading.Lock()
         self._status_state = HuggingFaceLocalState.READY
         self._status_message = HUGGING_FACE_LOCAL_PROVIDER_MESSAGE
 
@@ -330,6 +370,9 @@ class HuggingFaceLocalProvider(LLMProvider):
             active_model_label=runtime.label if runtime else None,
             active_model_revision=runtime.revision if runtime else None,
             active_model_resolved_revision=runtime.resolved_revision if runtime else None,
+            active_model_num_hidden_layers=runtime.num_hidden_layers if runtime else None,
+            active_model_num_attention_heads=runtime.num_attention_heads if runtime else None,
+            active_model_attention_implementation=runtime.attention_implementation if runtime else None,
             recommended_model_id=recommended_model_id,
             missing_dependencies=missing_dependencies,
             limits=HuggingFaceLocalLimits(
@@ -405,6 +448,11 @@ class HuggingFaceLocalProvider(LLMProvider):
                     model=model,
                     device=device,
                     dtype=dtype,
+                    num_hidden_layers=self._config_int(getattr(model, "config", None), "num_hidden_layers"),
+                    num_attention_heads=self._config_int(
+                        getattr(model, "config", None), "num_attention_heads"
+                    ),
+                    attention_implementation=self._attention_implementation_name(model),
                 )
                 self._set_status(
                     HuggingFaceLocalState.READY,
@@ -442,6 +490,226 @@ class HuggingFaceLocalProvider(LLMProvider):
             tokenizer_identity=self._tokenizer_identity(runtime.tokenizer, runtime.model_id),
             tokenizer_revision=self._tokenizer_revision(runtime.tokenizer, runtime),
         )
+
+    def _build_canonical_prompt_tokens(
+        self,
+        tokenizer: Any,
+        *,
+        prompt: str,
+    ) -> CanonicalPromptBuildResult:
+        messages = [{"role": "user", "content": prompt}]
+        prompt_ids_tensor = tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_tensors="pt",
+        )
+        prompt_ids = [int(value) for value in prompt_ids_tensor[0].tolist()]
+        formatted_prompt_text = self._render_chat_template_text(tokenizer, messages)
+        rendered_messages = self._extract_rendered_chat_messages(formatted_prompt_text or "")
+        special_token_ids = {
+            int(token_id)
+            for token_id in getattr(tokenizer, "all_special_ids", [])
+            if isinstance(token_id, int)
+        }
+        category_by_position = {
+            full_position: CanonicalTokenSourceCategory.TEMPLATE
+            for full_position in range(len(prompt_ids))
+        }
+        search_start = 0
+
+        for rendered_message in rendered_messages:
+            category = self._source_category_for_message_role(rendered_message.role)
+            if category is None or not rendered_message.content:
+                continue
+
+            content_ids = self._tokenizer_content_ids(tokenizer, rendered_message.content)
+            content_span = self._find_subsequence_from_index(
+                sequence=prompt_ids,
+                target=content_ids,
+                start_index=search_start,
+            )
+
+            if content_span is None:
+                continue
+
+            for full_position in range(content_span[0], content_span[1]):
+                category_by_position[full_position] = category
+
+            search_start = content_span[1]
+
+        if not rendered_messages:
+            prompt_content_ids = self._tokenizer_content_ids(tokenizer, prompt)
+            prompt_span = self._find_subsequence(prompt_ids, prompt_content_ids)
+            if prompt_span is not None:
+                for full_position in range(prompt_span[0], prompt_span[1]):
+                    category_by_position[full_position] = (
+                        CanonicalTokenSourceCategory.USER_PROMPT
+                    )
+
+        prompt_tokens: list[CanonicalPromptToken] = []
+
+        for full_position, token_id in enumerate(prompt_ids):
+            raw_token = self._raw_token(tokenizer, token_id)
+            decoded_contribution = self._decode_token(tokenizer, token_id)
+            special_token = token_id in special_token_ids
+            source_category = category_by_position.get(
+                full_position,
+                CanonicalTokenSourceCategory.TEMPLATE,
+            )
+            source_label = self._source_label_for_category(source_category)
+
+            prompt_tokens.append(
+                CanonicalPromptToken(
+                    token_id=token_id,
+                    raw_token=raw_token,
+                    display_token=self._display_token(decoded_contribution),
+                    decoded_contribution=decoded_contribution,
+                    token_bytes=self._token_bytes(decoded_contribution, raw_token),
+                    full_position=full_position,
+                    source_category=source_category,
+                    source_label=source_label,
+                    special_token=special_token,
+                )
+            )
+
+        system_messages = [
+            rendered_message.content
+            for rendered_message in rendered_messages
+            if rendered_message.role == "system" and rendered_message.content
+        ]
+        system_prompt = "\n\n".join(system_messages) if system_messages else None
+
+        return CanonicalPromptBuildResult(
+            prompt_ids=prompt_ids,
+            prompt_tokens=prompt_tokens,
+            raw_context_text=formatted_prompt_text,
+            system_prompt=system_prompt,
+        )
+
+    def _render_chat_template_text(
+        self,
+        tokenizer: Any,
+        messages: list[dict[str, str]],
+    ) -> str | None:
+        try:
+            rendered = tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=False,
+            )
+        except TypeError:
+            try:
+                rendered = tokenizer.apply_chat_template(
+                    messages,
+                    add_generation_prompt=True,
+                    tokenize=False,
+                    return_tensors=None,
+                )
+            except Exception:
+                return None
+        except Exception:
+            return None
+
+        return rendered if isinstance(rendered, str) else None
+
+    def _extract_rendered_chat_messages(
+        self,
+        rendered_text: str,
+    ) -> list[RenderedChatMessage]:
+        if not rendered_text:
+            return []
+
+        pattern = re.compile(
+            r"<\|im_start\|>(?P<role>[^\n]+)\n(?P<content>.*?)(?:<\|im_end\|>\n?|$)",
+            re.DOTALL,
+        )
+        messages: list[RenderedChatMessage] = []
+
+        for match in pattern.finditer(rendered_text):
+            role = match.group("role").strip().lower()
+            content = match.group("content")
+            messages.append(
+                RenderedChatMessage(
+                    role=role,
+                    content=content,
+                )
+            )
+
+        return messages
+
+    def _source_category_for_message_role(
+        self,
+        role: str,
+    ) -> CanonicalTokenSourceCategory | None:
+        if role == "system":
+            return CanonicalTokenSourceCategory.SYSTEM
+        if role == "user":
+            return CanonicalTokenSourceCategory.USER_PROMPT
+        if role == "assistant":
+            return CanonicalTokenSourceCategory.ASSISTANT_PREFIX
+        return None
+
+    def _source_label_for_category(
+        self,
+        category: CanonicalTokenSourceCategory,
+    ) -> str:
+        if category == CanonicalTokenSourceCategory.SYSTEM:
+            return "System message"
+        if category == CanonicalTokenSourceCategory.USER_PROMPT:
+            return "User prompt"
+        if category == CanonicalTokenSourceCategory.ASSISTANT_PREFIX:
+            return "Assistant prefix"
+        return "Template / control"
+
+    def _tokenizer_content_ids(self, tokenizer: Any, text: str) -> list[int]:
+        if not text:
+            return []
+
+        try:
+            encoded = tokenizer(text, add_special_tokens=False)
+        except Exception:
+            return []
+
+        input_ids = encoded.get("input_ids") if isinstance(encoded, dict) else getattr(encoded, "input_ids", None)
+        if input_ids is None:
+            return []
+        if input_ids and isinstance(input_ids[0], list):
+            input_ids = input_ids[0]
+        return [int(value) for value in input_ids]
+
+    def _find_subsequence(
+        self,
+        sequence: list[int],
+        target: list[int],
+    ) -> tuple[int, int] | None:
+        if not target or len(target) > len(sequence):
+            return None
+
+        last_start = len(sequence) - len(target)
+        for start in range(last_start + 1):
+            if sequence[start : start + len(target)] == target:
+                return start, start + len(target)
+
+        return None
+
+    def _find_subsequence_from_index(
+        self,
+        *,
+        sequence: list[int],
+        target: list[int],
+        start_index: int,
+    ) -> tuple[int, int] | None:
+        if not target or len(target) > len(sequence):
+            return None
+
+        last_start = len(sequence) - len(target)
+        effective_start = max(0, min(start_index, last_start))
+        for start in range(effective_start, last_start + 1):
+            if sequence[start : start + len(target)] == target:
+                return start, start + len(target)
+
+        return self._find_subsequence(sequence, target)
 
     def generate(
         self,
@@ -489,6 +757,9 @@ class HuggingFaceLocalProvider(LLMProvider):
                 full_prefix_ids,
                 prompt_ids_for_result,
                 generated_text_prefix,
+                prompt_token_metadata,
+                raw_context_text,
+                system_prompt,
             ) = self._resolve_generation_prefix(
                 runtime=runtime,
                 prompt=prompt,
@@ -538,8 +809,11 @@ class HuggingFaceLocalProvider(LLMProvider):
             return HuggingFaceGenerationResult(
                 completion=completion,
                 prompt_token_ids=prompt_ids_for_result,
+                prompt_tokens=prompt_token_metadata,
+                raw_context_text=raw_context_text,
+                system_prompt=system_prompt,
                 tokens=traces,
-                prompt_tokens=prompt_token_count,
+                prompt_token_count=prompt_token_count,
                 completion_tokens=completion_tokens,
                 total_tokens=prompt_token_count + completion_tokens,
                 latency_ms=latency_ms,
@@ -590,6 +864,675 @@ class HuggingFaceLocalProvider(LLMProvider):
             ) from exc
         finally:
             self._busy_lock.release()
+
+    def analyze_attention(
+        self,
+        request: HuggingFaceAttentionRequest,
+    ) -> HuggingFaceAttentionResponse:
+        assert torch is not None
+
+        model_spec = self._resolve_model(request.model_id)
+        runtime = self._require_loaded_runtime(model_spec.id)
+        self._ensure_cuda_available()
+        runtime_identity = self.get_runtime_identity(model_spec.id)
+        self._validate_attention_request(request, runtime, runtime_identity)
+        full_sequence_ids = [*request.prompt_token_ids, *request.generated_token_ids]
+        selected_token_position, query_position = self._resolve_attention_positions(request)
+        cache_key = self._make_attention_cache_key(
+            request,
+            full_sequence_ids=full_sequence_ids,
+            selected_token_position=selected_token_position,
+            query_position=query_position,
+        )
+        cached = self._get_cached_attention(cache_key)
+        if cached is not None:
+            return cached
+
+        if not self._busy_lock.acquire(blocking=False):
+            self._set_status(
+                HuggingFaceLocalState.BUSY,
+                f"{runtime.label} is busy. Wait for the current local task to finish before computing attention.",
+            )
+            raise LLMScopeError(
+                code="HF_LOCAL_BUSY",
+                message="The local analysis model is busy. Wait for the current local task to finish.",
+                status_code=503,
+            )
+
+        self._set_status(
+            HuggingFaceLocalState.BUSY,
+            f"Computing attention with {runtime.label} on {runtime.device}.",
+        )
+
+        outputs = None
+        attention_tuple = None
+        selected_attention_row = None
+        aggregated_row = None
+        try:
+            (
+                analyzed_ids,
+                window_start,
+                context_truncated,
+            ) = self._select_attention_context_window(
+                full_sequence_ids=full_sequence_ids,
+                query_position=query_position,
+                selected_token_position=selected_token_position,
+                max_context_tokens=request.max_context_tokens,
+                allow_truncated_recompute=request.allow_truncated_recompute,
+            )
+            query_position_in_window = query_position - window_start
+            selected_position_in_window = selected_token_position - window_start
+            original_attention_implementation = self._attention_implementation_name(runtime.model)
+
+            with self._runtime_lock:
+                self._set_attention_implementation(runtime.model, "eager")
+                try:
+                    device = next(runtime.model.parameters()).device
+                    input_ids = torch.tensor([analyzed_ids], dtype=torch.long, device=device)
+                    attention_mask = torch.ones_like(input_ids, device=device)
+
+                    with torch.inference_mode():
+                        outputs = runtime.model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            use_cache=False,
+                            output_attentions=True,
+                            output_hidden_states=False,
+                            return_dict=True,
+                        )
+                    attention_tuple = getattr(outputs, "attentions", None)
+                finally:
+                    self._set_attention_implementation(runtime.model, original_attention_implementation)
+
+            if not attention_tuple:
+                raise LLMScopeError(
+                    code="HF_ATTENTION_UNAVAILABLE",
+                    message=(
+                        "Attention mode is unavailable for the loaded Hugging Face Local runtime. "
+                        "Reload the model in an attention-compatible configuration and try again."
+                    ),
+                    status_code=503,
+                )
+
+            num_layers = len(attention_tuple)
+            if request.selected_layer >= num_layers:
+                raise LLMScopeError(
+                    code="HF_ATTENTION_LAYER_OUT_OF_RANGE",
+                    message=f"Layer {request.selected_layer} is out of range for this model.",
+                    status_code=400,
+                )
+
+            layer_attention = attention_tuple[request.selected_layer]
+            if layer_attention is None or layer_attention.ndim != 4:
+                raise LLMScopeError(
+                    code="HF_ATTENTION_UNAVAILABLE",
+                    message="The loaded Hugging Face Local runtime did not return a usable attention tensor.",
+                    status_code=503,
+                )
+
+            num_query_heads = int(layer_attention.shape[1])
+            if request.selected_head is not None and request.selected_head >= num_query_heads:
+                raise LLMScopeError(
+                    code="HF_ATTENTION_HEAD_OUT_OF_RANGE",
+                    message=f"Head {request.selected_head} is out of range for layer {request.selected_layer}.",
+                    status_code=400,
+                )
+
+            selected_attention_row = (
+                layer_attention[0, :, query_position_in_window, : query_position_in_window + 1]
+                .detach()
+                .to(torch.float32)
+                .cpu()
+            )
+            self._validate_attention_row(
+                selected_attention_row,
+                request=request,
+                runtime=runtime,
+                query_position=query_position,
+            )
+            aggregated_row = self._aggregate_attention_row(
+                selected_attention_row,
+                aggregation_mode=request.aggregation_mode,
+                selected_head=request.selected_head,
+            )
+            self._validate_aggregated_attention_row(
+                aggregated_row,
+                request=request,
+                runtime=runtime,
+                query_position=query_position,
+            )
+
+            response = self._build_attention_response(
+                request=request,
+                runtime=runtime,
+                full_sequence_ids=full_sequence_ids,
+                analyzed_ids=analyzed_ids,
+                selected_token_position=selected_token_position,
+                selected_position_in_window=selected_position_in_window,
+                query_position=query_position,
+                query_position_in_window=query_position_in_window,
+                aggregated_attention_row=aggregated_row,
+                num_layers=num_layers,
+                num_query_heads=num_query_heads,
+                context_truncated=context_truncated,
+                window_start=window_start,
+                attention_implementation_used="eager",
+            )
+            self._store_attention(cache_key, response)
+            self._set_status(
+                HuggingFaceLocalState.READY,
+                f"{runtime.label} is loaded on {runtime.device} ({runtime.dtype}).",
+            )
+            return response
+        except LLMScopeError:
+            self._set_status(
+                HuggingFaceLocalState.READY,
+                f"{runtime.label} is loaded on {runtime.device} ({runtime.dtype}).",
+            )
+            raise
+        except RuntimeError as exc:
+            if self._looks_like_oom(exc):
+                self._cleanup_cuda_after_oom()
+                self._set_status(
+                    HuggingFaceLocalState.OOM,
+                    "CUDA ran out of memory during attention analysis. Reduce the context limit or use the 1.5B model.",
+                )
+                raise LLMScopeError(
+                    code="HF_ATTENTION_OOM",
+                    message=(
+                        "CUDA ran out of memory while computing attention. Try a smaller attention context limit, "
+                        "use Qwen/Qwen2.5-1.5B-Instruct, or unload other GPU-heavy applications."
+                    ),
+                    status_code=503,
+                ) from exc
+            self._set_status(
+                HuggingFaceLocalState.ERROR,
+                "The local attention analysis failed unexpectedly.",
+            )
+            raise LLMScopeError(
+                code="HF_ATTENTION_FAILED",
+                message="The local attention analysis failed unexpectedly.",
+                status_code=500,
+            ) from exc
+        except Exception as exc:
+            self._set_status(
+                HuggingFaceLocalState.ERROR,
+                "The local attention analysis failed unexpectedly.",
+            )
+            raise LLMScopeError(
+                code="HF_ATTENTION_FAILED",
+                message="The local attention analysis failed unexpectedly.",
+                status_code=500,
+            ) from exc
+        finally:
+            del outputs
+            del attention_tuple
+            del selected_attention_row
+            del aggregated_row
+            gc.collect()
+            if torch is not None and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            self._busy_lock.release()
+
+    def _validate_attention_request(
+        self,
+        request: HuggingFaceAttentionRequest,
+        runtime: LoadedLocalRuntime,
+        runtime_identity: HuggingFaceRuntimeIdentity,
+    ) -> None:
+        if request.model_revision and request.model_revision != runtime_identity.model_revision:
+            raise LLMScopeError(
+                code="HF_ATTENTION_MODEL_REVISION_MISMATCH",
+                message="The selected graph was produced by a different loaded model revision.",
+                status_code=409,
+            )
+
+        if (
+            request.tokenizer_identity
+            and runtime_identity.tokenizer_identity
+            and request.tokenizer_identity != runtime_identity.tokenizer_identity
+        ):
+            raise LLMScopeError(
+                code="HF_ATTENTION_TOKENIZER_MISMATCH",
+                message="The selected graph was produced by a different tokenizer identity.",
+                status_code=409,
+            )
+
+        if (
+            request.tokenizer_revision
+            and runtime_identity.tokenizer_revision
+            and request.tokenizer_revision != runtime_identity.tokenizer_revision
+        ):
+            raise LLMScopeError(
+                code="HF_ATTENTION_TOKENIZER_MISMATCH",
+                message="The selected graph was produced by a different tokenizer revision.",
+                status_code=409,
+            )
+
+        if len(request.prompt_tokens) != len(request.prompt_token_ids):
+            raise LLMScopeError(
+                code="HF_ATTENTION_PROMPT_TOKEN_METADATA_MISMATCH",
+                message=(
+                    "Canonical prompt-token metadata is missing or does not match the formatted prompt token-ID sequence."
+                ),
+                status_code=400,
+            )
+
+        for full_position, prompt_token in enumerate(request.prompt_tokens):
+            if prompt_token.full_position != full_position:
+                raise LLMScopeError(
+                    code="HF_ATTENTION_PROMPT_TOKEN_POSITION_MISMATCH",
+                    message="Canonical prompt-token positions are not contiguous from the formatted prompt prefix.",
+                    status_code=400,
+                )
+            if prompt_token.token_id != request.prompt_token_ids[full_position]:
+                raise LLMScopeError(
+                    code="HF_ATTENTION_PROMPT_TOKEN_ID_MISMATCH",
+                    message="Canonical prompt-token IDs do not match the formatted prompt token-ID prefix.",
+                    status_code=400,
+                )
+
+        if not request.generated_token_ids:
+            raise LLMScopeError(
+                code="HF_ATTENTION_GENERATED_IDS_REQUIRED",
+                message="The selected token lacks canonical generated token IDs for attention analysis.",
+                status_code=400,
+            )
+
+        if request.selected_generated_token_index >= len(request.generated_token_ids):
+            raise LLMScopeError(
+                code="HF_ATTENTION_INDEX_OUT_OF_RANGE",
+                message="The selected generated-token index is outside the canonical generated token sequence.",
+                status_code=400,
+            )
+
+        if runtime.num_hidden_layers is not None and request.selected_layer >= runtime.num_hidden_layers:
+            raise LLMScopeError(
+                code="HF_ATTENTION_LAYER_OUT_OF_RANGE",
+                message=f"Layer {request.selected_layer} is out of range for the loaded model.",
+                status_code=400,
+            )
+
+        if request.aggregation_mode == HuggingFaceAttentionAggregationMode.SINGLE_HEAD and request.selected_head is None:
+            raise LLMScopeError(
+                code="HF_ATTENTION_HEAD_REQUIRED",
+                message="An individual attention head must be selected when using single-head attention mode.",
+                status_code=400,
+            )
+
+        if request.aggregation_mode != HuggingFaceAttentionAggregationMode.SINGLE_HEAD and request.selected_head is not None:
+            raise LLMScopeError(
+                code="HF_ATTENTION_HEAD_MODE_CONFLICT",
+                message="Choose either a single head or an aggregation mode, but not both.",
+                status_code=400,
+            )
+
+        if runtime.num_attention_heads is not None and request.selected_head is not None:
+            if request.selected_head >= runtime.num_attention_heads:
+                raise LLMScopeError(
+                    code="HF_ATTENTION_HEAD_OUT_OF_RANGE",
+                    message=f"Head {request.selected_head} is out of range for the loaded model.",
+                    status_code=400,
+                )
+
+    def _resolve_attention_positions(
+        self,
+        request: HuggingFaceAttentionRequest,
+    ) -> tuple[int, int]:
+        prompt_token_count = len(request.prompt_token_ids)
+        selected_token_position = prompt_token_count + request.selected_generated_token_index
+        query_position = (
+            selected_token_position - 1
+            if request.analysis_mode == HuggingFaceAttentionAnalysisMode.PREDICTION
+            else selected_token_position
+        )
+        if query_position < 0:
+            raise LLMScopeError(
+                code="HF_ATTENTION_QUERY_POSITION_INVALID",
+                message=(
+                    "Prediction attention for the first generated token requires canonical prompt/chat-template tokens."
+                ),
+                status_code=400,
+            )
+        return selected_token_position, query_position
+
+    def _select_attention_context_window(
+        self,
+        *,
+        full_sequence_ids: list[int],
+        query_position: int,
+        selected_token_position: int,
+        max_context_tokens: int,
+        allow_truncated_recompute: bool,
+    ) -> tuple[list[int], int, bool]:
+        prefix_through_selected = full_sequence_ids[: selected_token_position + 1]
+        if len(prefix_through_selected) <= max_context_tokens:
+            return prefix_through_selected, 0, False
+
+        if not allow_truncated_recompute:
+            raise LLMScopeError(
+                code="HF_ATTENTION_CONTEXT_TOO_LONG",
+                message=(
+                    f"Sequence too long for exact attention analysis. The canonical prefix through the selected token "
+                    f"uses {len(prefix_through_selected)} tokens, which exceeds the analysis limit of "
+                    f"{max_context_tokens}. Enable truncated recomputation explicitly if you want an approximate "
+                    "local attention view."
+                ),
+                status_code=400,
+            )
+
+        window_end = len(prefix_through_selected)
+        window_start = max(0, window_end - max_context_tokens)
+        if query_position < window_start:
+            raise LLMScopeError(
+                code="HF_ATTENTION_CONTEXT_TOO_LONG",
+                message=(
+                    f"Sequence too long for attention analysis at the selected query position. The retained "
+                    f"{max_context_tokens}-token window would exclude the required canonical query row."
+                ),
+                status_code=400,
+            )
+        return prefix_through_selected[window_start:window_end], window_start, True
+
+    def _set_attention_implementation(self, model: Any, implementation: str | None) -> None:
+        config = getattr(model, "config", None)
+        if config is None:
+            return
+        if implementation is None:
+            return
+        setattr(config, "_attn_implementation", implementation)
+
+    def _aggregate_attention_row(
+        self,
+        attention_row: Any,
+        *,
+        aggregation_mode: HuggingFaceAttentionAggregationMode,
+        selected_head: int | None,
+    ) -> Any:
+        assert torch is not None
+        if aggregation_mode == HuggingFaceAttentionAggregationMode.SINGLE_HEAD:
+            if selected_head is None:
+                raise LLMScopeError(
+                    code="HF_ATTENTION_HEAD_REQUIRED",
+                    message="An attention head must be selected for single-head mode.",
+                    status_code=400,
+                )
+            return attention_row[selected_head]
+        if aggregation_mode == HuggingFaceAttentionAggregationMode.MAX_HEADS:
+            return torch.max(attention_row, dim=0).values
+        return torch.mean(attention_row, dim=0)
+
+    def _validate_attention_row(
+        self,
+        attention_row: Any,
+        *,
+        request: HuggingFaceAttentionRequest,
+        runtime: LoadedLocalRuntime,
+        query_position: int,
+    ) -> None:
+        assert torch is not None
+        if not torch.isfinite(attention_row).all():
+            logger.warning(
+                "hf-attention-invalid-row model=%s revision=%s mode=%s layer=%s head=%s query_position=%s reason=non_finite",
+                runtime.model_id,
+                runtime.resolved_revision or runtime.revision,
+                request.analysis_mode.value,
+                request.selected_layer,
+                request.selected_head,
+                query_position,
+            )
+            raise LLMScopeError(
+                code="HF_ATTENTION_INVALID",
+                message="The selected attention row contained non-finite values for valid causal positions.",
+                status_code=500,
+            )
+        if torch.any(attention_row < 0):
+            raise LLMScopeError(
+                code="HF_ATTENTION_INVALID",
+                message="The selected attention row contained negative values.",
+                status_code=500,
+            )
+        if not torch.any(attention_row > 0):
+            raise LLMScopeError(
+                code="HF_ATTENTION_INVALID",
+                message="The selected attention row did not contain any usable attention mass.",
+                status_code=500,
+            )
+
+    def _validate_aggregated_attention_row(
+        self,
+        aggregated_row: Any,
+        *,
+        request: HuggingFaceAttentionRequest,
+        runtime: LoadedLocalRuntime,
+        query_position: int,
+    ) -> None:
+        assert torch is not None
+        if not torch.isfinite(aggregated_row).all():
+            logger.warning(
+                "hf-attention-invalid-aggregate model=%s revision=%s mode=%s layer=%s head=%s query_position=%s reason=non_finite",
+                runtime.model_id,
+                runtime.resolved_revision or runtime.revision,
+                request.analysis_mode.value,
+                request.selected_layer,
+                request.selected_head,
+                query_position,
+            )
+            raise LLMScopeError(
+                code="HF_ATTENTION_INVALID",
+                message="The aggregated attention row contained non-finite values.",
+                status_code=500,
+            )
+        if torch.any(aggregated_row < 0):
+            raise LLMScopeError(
+                code="HF_ATTENTION_INVALID",
+                message="The aggregated attention row contained negative values.",
+                status_code=500,
+            )
+        if request.aggregation_mode in (
+            HuggingFaceAttentionAggregationMode.AVERAGE_HEADS,
+            HuggingFaceAttentionAggregationMode.SINGLE_HEAD,
+        ):
+            row_sum = float(aggregated_row.sum().item())
+            if abs(row_sum - 1.0) > 0.05:
+                raise LLMScopeError(
+                    code="HF_ATTENTION_INVALID",
+                    message="The aggregated attention row did not sum to one within numerical tolerance.",
+                    status_code=500,
+                )
+
+    def _make_attention_cache_key(
+        self,
+        request: HuggingFaceAttentionRequest,
+        *,
+        full_sequence_ids: list[int],
+        selected_token_position: int,
+        query_position: int,
+    ) -> str:
+        sequence_bytes = ",".join(str(token_id) for token_id in full_sequence_ids).encode("utf-8")
+        sequence_hash = hashlib.sha1(sequence_bytes).hexdigest()
+        return "|".join(
+            [
+                request.model_id,
+                request.model_revision or "",
+                request.tokenizer_identity or "",
+                request.tokenizer_revision or "",
+                sequence_hash,
+                request.analysis_mode.value,
+                str(selected_token_position),
+                str(query_position),
+                str(request.selected_generated_token_index),
+                str(request.selected_layer),
+                str(request.selected_head if request.selected_head is not None else "avg"),
+                request.aggregation_mode.value,
+                str(request.max_connections),
+                str(request.max_context_tokens),
+                "truncated" if request.allow_truncated_recompute else "exact",
+            ]
+        )
+
+    def _get_cached_attention(self, cache_key: str) -> HuggingFaceAttentionResponse | None:
+        with self._attention_cache_lock:
+            cached = self._attention_cache.get(cache_key)
+            if cached is None:
+                return None
+            self._attention_cache.move_to_end(cache_key)
+            return cached.model_copy(deep=True)
+
+    def _store_attention(self, cache_key: str, response: HuggingFaceAttentionResponse) -> None:
+        with self._attention_cache_lock:
+            self._attention_cache[cache_key] = response.model_copy(deep=True)
+            self._attention_cache.move_to_end(cache_key)
+            while len(self._attention_cache) > ATTENTION_CACHE_SIZE:
+                self._attention_cache.popitem(last=False)
+
+    def _build_attention_response(
+        self,
+        *,
+        request: HuggingFaceAttentionRequest,
+        runtime: LoadedLocalRuntime,
+        full_sequence_ids: list[int],
+        analyzed_ids: list[int],
+        selected_token_position: int,
+        selected_position_in_window: int,
+        query_position: int,
+        query_position_in_window: int,
+        aggregated_attention_row: Any,
+        num_layers: int,
+        num_query_heads: int,
+        context_truncated: bool,
+        window_start: int,
+        attention_implementation_used: str,
+    ) -> HuggingFaceAttentionResponse:
+        assert torch is not None
+        analyzed_tokens: list[HuggingFaceAttentionTokenInfo] = []
+        sources: list[HuggingFaceAttentionSource] = []
+        prompt_length = len(request.prompt_token_ids)
+        ranked_sources: list[tuple[float, HuggingFaceAttentionTokenInfo]] = []
+        prompt_token_by_position = {
+            token.full_position: token for token in request.prompt_tokens
+        }
+        source_positions = [
+            window_start + analyzed_position
+            for analyzed_position in range(query_position_in_window + 1)
+        ]
+        attention_weights = [
+            round(float(aggregated_attention_row[analyzed_position].item()), 6)
+            for analyzed_position in range(query_position_in_window + 1)
+        ]
+
+        for analyzed_position, token_id in enumerate(analyzed_ids):
+            full_position = window_start + analyzed_position
+            sequence_scope = (
+                HuggingFaceAttentionSequenceScope.PROMPT
+                if full_position < prompt_length
+                else HuggingFaceAttentionSequenceScope.GENERATED
+            )
+            generated_token_index = full_position - prompt_length if full_position >= prompt_length else None
+            prompt_token = prompt_token_by_position.get(full_position)
+            if prompt_token is not None:
+                raw_token = prompt_token.raw_token
+                display_token = prompt_token.display_token
+                decoded_contribution = prompt_token.decoded_contribution
+                token_bytes = list(prompt_token.token_bytes)
+                source_category = prompt_token.source_category
+                source_label = prompt_token.source_label
+                special_token = prompt_token.special_token
+            else:
+                raw_token = self._raw_token(runtime.tokenizer, token_id)
+                decoded_contribution = self._decode_token(runtime.tokenizer, token_id)
+                display_token = self._display_token(decoded_contribution)
+                token_bytes = self._token_bytes(decoded_contribution, raw_token)
+                source_category = CanonicalTokenSourceCategory.GENERATED_OUTPUT
+                source_label = "Earlier output"
+                special_token = False
+
+            attention_weight = (
+                float(aggregated_attention_row[analyzed_position].item())
+                if analyzed_position <= query_position_in_window
+                else None
+            )
+            token_info = HuggingFaceAttentionTokenInfo(
+                token_id=token_id,
+                raw_token=raw_token,
+                display_token=display_token,
+                decoded_contribution=decoded_contribution,
+                token_bytes=token_bytes,
+                full_position=full_position,
+                analyzed_position=analyzed_position,
+                sequence_scope=sequence_scope,
+                source_category=source_category,
+                source_label=source_label,
+                special_token=special_token,
+                generated_token_index=generated_token_index,
+                attention_weight=round(attention_weight, 6) if attention_weight is not None else None,
+                is_query=analyzed_position == query_position_in_window,
+                is_selected_token=analyzed_position == selected_position_in_window,
+            )
+            analyzed_tokens.append(token_info)
+            if attention_weight is not None:
+                ranked_sources.append((attention_weight, token_info))
+
+        ranked_sources.sort(key=lambda item: item[0], reverse=True)
+        for rank, (weight, token_info) in enumerate(ranked_sources[: request.max_connections], start=1):
+            sources.append(
+                HuggingFaceAttentionSource(
+                    token_id=token_info.token_id,
+                    raw_token=token_info.raw_token,
+                    display_token=token_info.display_token,
+                    decoded_contribution=token_info.decoded_contribution,
+                    token_bytes=list(token_info.token_bytes),
+                    full_position=token_info.full_position,
+                    analyzed_position=token_info.analyzed_position,
+                    sequence_scope=token_info.sequence_scope,
+                    source_category=token_info.source_category,
+                    source_label=token_info.source_label,
+                    special_token=token_info.special_token,
+                    generated_token_index=token_info.generated_token_index,
+                    attention_weight=round(weight, 6),
+                    rank=rank,
+                )
+            )
+
+        attention_mass_sum = float(torch.sum(aggregated_attention_row).item())
+        top_n_coverage = float(sum(source.attention_weight for source in sources))
+        selected_token = analyzed_tokens[selected_position_in_window]
+        query_token = analyzed_tokens[query_position_in_window]
+        return HuggingFaceAttentionResponse(
+            model_id=runtime.model_id,
+            model_revision=runtime.resolved_revision or runtime.revision,
+            tokenizer_identity=self._tokenizer_identity(runtime.tokenizer, runtime.model_id),
+            tokenizer_revision=self._tokenizer_revision(runtime.tokenizer, runtime),
+            analysis_mode=request.analysis_mode,
+            selected_token=selected_token,
+            query_token=query_token,
+            analyzed_tokens=analyzed_tokens,
+            sources=sources,
+            selected_layer=request.selected_layer,
+            selected_head=request.selected_head,
+            aggregation_mode=request.aggregation_mode,
+            attention_implementation_used=attention_implementation_used,
+            num_layers=num_layers,
+            num_query_heads=num_query_heads,
+            selected_token_position=selected_token_position,
+            query_position=query_position,
+            selected_token_id=selected_token.token_id,
+            query_token_id=query_token.token_id,
+            prompt_token_count=prompt_length,
+            generated_token_index=request.selected_generated_token_index,
+            sequence_length=len(full_sequence_ids),
+            layer_index=request.selected_layer,
+            head_index=request.selected_head,
+            average_heads=request.aggregation_mode == HuggingFaceAttentionAggregationMode.AVERAGE_HEADS,
+            source_positions=source_positions,
+            attention_weights=attention_weights,
+            attention_mass_sum=round(attention_mass_sum, 6),
+            top_n_coverage=round(top_n_coverage, 6),
+            truncated_context=context_truncated,
+            context_truncated=context_truncated,
+            original_full_context_length=len(full_sequence_ids),
+            analyzed_context_length=len(analyzed_ids),
+        )
 
     def _ordered_supported_models(self, recommended_model_id: str | None) -> list[SupportedLocalModel]:
         if recommended_model_id is None:
@@ -702,6 +1645,15 @@ class HuggingFaceLocalProvider(LLMProvider):
     def _normalize_dtype_name(self, dtype: Any) -> str:
         value = str(dtype)
         return value.replace("torch.", "")
+
+    def _config_int(self, config: Any, field_name: str) -> int | None:
+        value = getattr(config, field_name, None)
+        return int(value) if isinstance(value, int) and value > 0 else None
+
+    def _attention_implementation_name(self, model: Any) -> str | None:
+        config = getattr(model, "config", None)
+        value = getattr(config, "_attn_implementation", None)
+        return value if isinstance(value, str) and value else None
 
     def _tokenizer_identity(self, tokenizer: Any, fallback_model_id: str) -> str | None:
         value = getattr(tokenizer, "name_or_path", None)
@@ -826,6 +1778,8 @@ class HuggingFaceLocalProvider(LLMProvider):
     def _cleanup_runtime(self) -> None:
         runtime = self._runtime
         self._runtime = None
+        with self._attention_cache_lock:
+            self._attention_cache.clear()
         if runtime is not None:
             del runtime.model
             del runtime.tokenizer
@@ -859,10 +1813,17 @@ class HuggingFaceLocalProvider(LLMProvider):
         assistant_prefix: str,
         canonical_prefix_token_ids: list[int] | None,
         prompt_token_ids: list[int] | None,
-    ) -> tuple[list[int], list[int] | None, str]:
+    ) -> tuple[
+        list[int],
+        list[int] | None,
+        str,
+        list[CanonicalPromptToken] | None,
+        str | None,
+        str | None,
+    ]:
         if canonical_prefix_token_ids is not None:
             prefix_ids = list(canonical_prefix_token_ids)
-            return prefix_ids, prompt_token_ids, assistant_prefix
+            return prefix_ids, prompt_token_ids, assistant_prefix, None, None, None
 
         if assistant_prefix:
             raise LLMScopeError(
@@ -873,14 +1834,18 @@ class HuggingFaceLocalProvider(LLMProvider):
                 status_code=400,
             )
 
-        prompt_ids_tensor = runtime.tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}],
-            add_generation_prompt=True,
-            tokenize=True,
-            return_tensors="pt",
+        prompt_build = self._build_canonical_prompt_tokens(
+            runtime.tokenizer,
+            prompt=prompt,
         )
-        prompt_ids = [int(value) for value in prompt_ids_tensor[0].tolist()]
-        return prompt_ids, prompt_ids, ""
+        return (
+            prompt_build.prompt_ids,
+            prompt_build.prompt_ids,
+            "",
+            prompt_build.prompt_tokens,
+            prompt_build.raw_context_text,
+            prompt_build.system_prompt,
+        )
 
     def _run_generation_loop(
         self,

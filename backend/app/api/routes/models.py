@@ -2,6 +2,8 @@ from fastapi import APIRouter, HTTPException, Query, status
 
 from app.core.errors import LLMScopeError
 from app.schemas.huggingface_local import (
+    HuggingFaceAttentionRequest,
+    HuggingFaceAttentionResponse,
     HuggingFaceLocalDiagnosticsResponse,
     HuggingFaceLocalLoadRequest,
     HuggingFaceLocalStatusResponse,
@@ -82,5 +84,20 @@ def unload_huggingface_local_model() -> HuggingFaceLocalStatusResponse:
 def get_huggingface_local_diagnostics() -> HuggingFaceLocalDiagnosticsResponse:
     try:
         return generation_service.get_huggingface_local_diagnostics()
+    except LLMScopeError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_detail()) from exc
+
+
+@router.post(
+    "/providers/hugging-face-local/attention",
+    response_model=HuggingFaceAttentionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Analyze token attention for the loaded Hugging Face Local model",
+)
+def analyze_huggingface_local_attention(
+    request: HuggingFaceAttentionRequest,
+) -> HuggingFaceAttentionResponse:
+    try:
+        return generation_service.analyze_huggingface_attention(request)
     except LLMScopeError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.to_detail()) from exc

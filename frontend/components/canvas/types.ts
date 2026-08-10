@@ -1,6 +1,10 @@
 import type { Edge, Node } from "@xyflow/react";
 
-import type { ContinuationMode, ProviderCapabilitiesDetail } from "@/types/api";
+import type {
+  CanonicalTokenSourceCategory,
+  ContinuationMode,
+  ProviderCapabilitiesDetail,
+} from "@/types/api";
 
 export type ProbabilityViewMode = "normalized" | "raw";
 
@@ -96,6 +100,9 @@ export interface TokenNodeData extends Record<string, unknown> {
   reasoningFocusTerms: string[];
   branchRationale: string | null;
   metadata: Record<string, string | number | boolean | null>;
+  sourceCategory: CanonicalTokenSourceCategory;
+  sourceLabel: string;
+  specialToken: boolean;
   providerCapabilities: ProviderCapabilitiesDetail;
   rawLogits: number[] | null;
   topAlternatives: InspectorAlternative[];
@@ -125,3 +132,25 @@ export interface ProbabilityEdgeData extends Record<string, unknown> {
 }
 
 export type ProbabilityFlowEdge = Edge<ProbabilityEdgeData, "probabilityEdge">;
+
+export interface AttentionEdgeData extends Record<string, unknown> {
+  analysisMode: "prediction" | "representation";
+  queryPosition: number;
+  weight: number;
+  rank: number;
+  layer: number;
+  headLabel: string;
+  sourceDisplayToken: string;
+  targetDisplayToken: string;
+  sourceScope: "prompt" | "generated";
+  sourceCategory: CanonicalTokenSourceCategory;
+  sourceLabel: string;
+  sourceFullPosition: number;
+  targetFullPosition: number;
+  isPinned: boolean;
+  isDimmed: boolean;
+}
+
+export type AttentionFlowEdge = Edge<AttentionEdgeData, "attentionEdge">;
+
+export type CanvasFlowEdge = ProbabilityFlowEdge | AttentionFlowEdge;

@@ -1290,6 +1290,57 @@ class GenerationServiceCanonicalStateTest(unittest.TestCase):
             self.assertIsNone(token.log_probability)
             self.assertEqual(token.metadata.get("provider"), ModelProvider.OLLAMA.value)
 
+    def test_build_generation_context_messages_for_hugging_face_uses_saved_system_and_raw_context(self) -> None:
+        messages, raw_context_text = self.service._build_generation_context_messages(
+            provider=ModelProvider.HUGGING_FACE,
+            prompt="Return only OCEAN.",
+            preset="general",
+            intent="retrieval",
+            variation=0,
+            local_result=SimpleNamespace(
+                raw_context_text=(
+                    "<|im_start|>system\nYou are Qwen.\n<|im_end|>\n"
+                    "<|im_start|>user\nReturn only OCEAN.\n<|im_end|>\n"
+                    "<|im_start|>assistant\n"
+                ),
+                system_prompt="You are Qwen.",
+            ),
+        )
+
+        self.assertEqual(
+            raw_context_text,
+            (
+                "<|im_start|>system\nYou are Qwen.\n<|im_end|>\n"
+                "<|im_start|>user\nReturn only OCEAN.\n<|im_end|>\n"
+                "<|im_start|>assistant\n"
+            ),
+        )
+        self.assertEqual(messages[0].role, "system")
+        self.assertEqual(messages[0].content, "You are Qwen.")
+        self.assertEqual(messages[0].source, "provider_default")
+        self.assertEqual(messages[1].role, "user")
+        self.assertEqual(messages[1].content, "Return only OCEAN.")
+
+    def test_build_generation_context_messages_for_openai_uses_composed_system_instructions(self) -> None:
+        messages, raw_context_text = self.service._build_generation_context_messages(
+            provider=ModelProvider.OPENAI,
+            prompt="Summarize this.",
+            preset="general",
+            intent="summary",
+            variation=0,
+            local_result=None,
+        )
+
+        self.assertIsNone(raw_context_text)
+        self.assertEqual(messages[0].role, "system")
+        self.assertEqual(messages[0].source, "composed_instructions")
+        self.assertIn(
+            "You are answering inside a model-inspection UI.",
+            messages[0].content,
+        )
+        self.assertEqual(messages[1].role, "user")
+        self.assertEqual(messages[1].content, "Summarize this.")
+
 
 if __name__ == "__main__":
     unittest.main()

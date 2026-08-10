@@ -28,6 +28,7 @@ from app.schemas.generation import (
     ContinuationMode,
     ContinueGenerationRequest,
     ContinueGenerationResponse,
+    GenerationContextMessage,
     GenerationRequest,
     GenerationResponse,
     GenerationStats,
@@ -41,6 +42,8 @@ from app.schemas.generation import (
     TreeSummary,
 )
 from app.schemas.huggingface_local import (
+    HuggingFaceAttentionRequest,
+    HuggingFaceAttentionResponse,
     HuggingFaceLocalDiagnosticsResponse,
     HuggingFaceLocalLoadRequest,
     HuggingFaceLocalStatusResponse,
@@ -484,6 +487,12 @@ class GenerationService:
     def get_huggingface_local_diagnostics(self) -> HuggingFaceLocalDiagnosticsResponse:
         return self._huggingface_provider.get_diagnostics()
 
+    def analyze_huggingface_attention(
+        self,
+        request: HuggingFaceAttentionRequest,
+    ) -> HuggingFaceAttentionResponse:
+        return self._huggingface_provider.analyze_attention(request)
+
     def build_response(self, request: GenerationRequest) -> GenerationResponse:
         prompt = request.prompt
         keywords = self._extract_keywords(prompt)
@@ -498,6 +507,9 @@ class GenerationService:
             request.provider,
         )
         prompt_token_ids: list[int] | None = None
+        prompt_token_metadata = None
+        prompt_token_count_override: int | None = None
+        local_result: HuggingFaceGenerationResult | None = None
 
         if request.demo_mode:
             completion, response_mode, usage, latency_ms, tokens = self._build_demo_generation(
@@ -518,6 +530,8 @@ class GenerationService:
             latency_ms = local_result.latency_ms
             tokens = local_result.tokens
             prompt_token_ids = local_result.prompt_token_ids
+            prompt_token_metadata = local_result.prompt_tokens
+            prompt_token_count_override = local_result.prompt_token_count
         elif model_option.provider == ModelProvider.OLLAMA:
             completion, response_mode, usage, latency_ms, tokens = self._build_ollama_generation(
                 request=request,
@@ -546,7 +560,11 @@ class GenerationService:
             ),
         )
         tree, tree_summary = self._build_tree(tokens)
-        prompt_tokens = self._usage_value(usage, "input_tokens") or self._estimate_prompt_tokens(prompt, keywords)
+        prompt_tokens = (
+            prompt_token_count_override
+            if prompt_token_count_override is not None
+            else self._usage_value(usage, "input_tokens") or self._estimate_prompt_tokens(prompt, keywords)
+        )
         completion_tokens = self._usage_value(usage, "output_tokens") or len(tokens)
         total_tokens = self._usage_value(usage, "total_tokens") or (prompt_tokens + completion_tokens)
         effective_latency_ms = latency_ms or max(1, len(tokens) * 30)
@@ -590,11 +608,23 @@ class GenerationService:
                 )
             )
         )
+        context_messages, raw_context_text = self._build_generation_context_messages(
+            provider=model_option.provider,
+            prompt=prompt,
+            preset=preset,
+            intent=intent,
+            variation=request.variation,
+            local_result=local_result,
+        )
 
         return GenerationResponse(
             mode=response_mode,
             prompt_used=prompt,
             prompt_token_ids=prompt_token_ids,
+            prompt_tokens=prompt_token_metadata,
+            context_messages=context_messages,
+            raw_context_text=raw_context_text,
+            system_prompt_editable=False,
             completion=completion,
             notes=notes,
             request=RequestEcho(
@@ -2612,6 +2642,58 @@ class GenerationService:
         ]
 
         return " ".join(parts)
+
+    def _build_generation_context_messages(
+        self,
+        *,
+        provider: ModelProvider,
+        prompt: str,
+        preset: str,
+        intent: str,
+        variation: int,
+        local_result: HuggingFaceGenerationResult | None,
+    ) -> tuple[list[GenerationContextMessage], str | None]:
+        messages: list[GenerationContextMessage] = []
+        raw_context_text: str | None = None
+
+        if provider == ModelProvider.HUGGING_FACE:
+            raw_context_text = local_result.raw_context_text if local_result else None
+            if local_result and local_result.system_prompt:
+                messages.append(
+                    GenerationContextMessage(
+                        role="system",
+                        label="System",
+                        content=local_result.system_prompt,
+                        source="provider_default",
+                        editable=False,
+                    )
+                )
+        elif provider == ModelProvider.OPENAI:
+            messages.append(
+                GenerationContextMessage(
+                    role="system",
+                    label="System",
+                    content=self._build_live_instructions(
+                        preset=preset,
+                        intent=intent,
+                        variation=variation,
+                    ),
+                    source="composed_instructions",
+                    editable=False,
+                )
+            )
+
+        messages.append(
+            GenerationContextMessage(
+                role="user",
+                label="User",
+                content=prompt,
+                source="user_prompt",
+                editable=False,
+            )
+        )
+
+        return messages, raw_context_text
 
     def _build_demo_completion(
         self,

@@ -4,6 +4,15 @@ export interface ApiErrorDetail {
 }
 
 export type ContinuationMode = "exact" | "approximate";
+export type CanonicalTokenSourceCategory =
+  | "system"
+  | "user_prompt"
+  | "template"
+  | "assistant_prefix"
+  | "generated_output";
+export type HuggingFaceAttentionAnalysisMode = "prediction" | "representation";
+export type HuggingFaceAttentionAggregationMode = "single_head" | "average_heads" | "max_heads";
+export type HuggingFaceAttentionSequenceScope = "prompt" | "generated";
 
 export interface ProviderCapabilitiesDetail {
   supports_logprobs: boolean;
@@ -170,10 +179,38 @@ export interface GenerationStats {
   generated_at: string;
 }
 
+export interface CanonicalPromptToken {
+  token_id: number;
+  raw_token: string;
+  display_token: string;
+  decoded_contribution: string;
+  token_bytes: number[];
+  full_position: number;
+  source_category: CanonicalTokenSourceCategory;
+  source_label: string;
+  special_token: boolean;
+}
+
+export interface GenerationContextMessage {
+  role: "system" | "user" | "assistant";
+  label: string;
+  content: string;
+  source:
+    | "provider_default"
+    | "composed_instructions"
+    | "user_prompt"
+    | "assistant_prefix";
+  editable: boolean;
+}
+
 export interface GenerationResponse {
   mode: string;
   prompt_used: string;
   prompt_token_ids?: number[] | null;
+  prompt_tokens?: CanonicalPromptToken[] | null;
+  context_messages?: GenerationContextMessage[];
+  raw_context_text?: string | null;
+  system_prompt_editable?: boolean;
   completion: string;
   notes: string;
   request: RequestEcho;
@@ -285,6 +322,96 @@ export type HuggingFaceLocalState =
   | "oom"
   | "error";
 
+export interface HuggingFaceAttentionRequest {
+  model_id: string;
+  model_revision?: string | null;
+  tokenizer_identity?: string | null;
+  tokenizer_revision?: string | null;
+  prompt_token_ids: number[];
+  prompt_tokens: CanonicalPromptToken[];
+  generated_token_ids: number[];
+  selected_generated_token_index: number;
+  selected_layer: number;
+  selected_head?: number | null;
+  analysis_mode: HuggingFaceAttentionAnalysisMode;
+  aggregation_mode: HuggingFaceAttentionAggregationMode;
+  max_connections: number;
+  max_context_tokens: number;
+  allow_truncated_recompute: boolean;
+}
+
+export interface HuggingFaceAttentionTokenInfo {
+  token_id: number;
+  raw_token: string;
+  display_token: string;
+  decoded_contribution: string;
+  token_bytes: number[];
+  full_position: number;
+  analyzed_position: number;
+  sequence_scope: HuggingFaceAttentionSequenceScope;
+  source_category: CanonicalTokenSourceCategory;
+  source_label: string;
+  special_token: boolean;
+  generated_token_index?: number | null;
+  attention_weight?: number | null;
+  is_query: boolean;
+  is_selected_token: boolean;
+}
+
+export interface HuggingFaceAttentionSource {
+  token_id: number;
+  raw_token: string;
+  display_token: string;
+  decoded_contribution: string;
+  token_bytes: number[];
+  full_position: number;
+  analyzed_position: number;
+  sequence_scope: HuggingFaceAttentionSequenceScope;
+  source_category: CanonicalTokenSourceCategory;
+  source_label: string;
+  special_token: boolean;
+  generated_token_index?: number | null;
+  attention_weight: number;
+  rank: number;
+}
+
+export interface HuggingFaceAttentionResponse {
+  provider: "hugging_face";
+  model_id: string;
+  model_revision?: string | null;
+  tokenizer_identity?: string | null;
+  tokenizer_revision?: string | null;
+  analysis_mode: HuggingFaceAttentionAnalysisMode;
+  selected_token: HuggingFaceAttentionTokenInfo;
+  query_token: HuggingFaceAttentionTokenInfo;
+  analyzed_tokens: HuggingFaceAttentionTokenInfo[];
+  sources: HuggingFaceAttentionSource[];
+  selected_layer: number;
+  selected_head?: number | null;
+  aggregation_mode: HuggingFaceAttentionAggregationMode;
+  attention_implementation_used: string;
+  num_layers: number;
+  num_query_heads: number;
+  selected_token_position: number;
+  query_position: number;
+  selected_token_id: number;
+  query_token_id: number;
+  prompt_token_count: number;
+  generated_token_index: number;
+  sequence_length: number;
+  layer_index: number;
+  head_index?: number | null;
+  average_heads: boolean;
+  source_positions: number[];
+  attention_weights: number[];
+  attention_mass_sum: number;
+  top_n_coverage: number;
+  truncated_context: boolean;
+  context_truncated: boolean;
+  original_full_context_length: number;
+  analyzed_context_length: number;
+}
+
 export interface HuggingFaceLocalModelStatus {
   id: string;
   label: string;
@@ -323,6 +450,9 @@ export interface HuggingFaceLocalStatusResponse {
   active_model_label?: string | null;
   active_model_revision?: string | null;
   active_model_resolved_revision?: string | null;
+  active_model_num_hidden_layers?: number | null;
+  active_model_num_attention_heads?: number | null;
+  active_model_attention_implementation?: string | null;
   recommended_model_id?: string | null;
   missing_dependencies: string[];
   limits: HuggingFaceLocalLimits;

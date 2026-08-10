@@ -15,9 +15,42 @@ class ContinuationMode(str, Enum):
     APPROXIMATE = "approximate"
 
 
+class CanonicalTokenSourceCategory(str, Enum):
+    SYSTEM = "system"
+    USER_PROMPT = "user_prompt"
+    TEMPLATE = "template"
+    ASSISTANT_PREFIX = "assistant_prefix"
+    GENERATED_OUTPUT = "generated_output"
+
+
 class ApiErrorDetail(BaseModel):
     code: str
     message: str
+
+
+class CanonicalPromptToken(BaseModel):
+    token_id: int = Field(..., ge=0)
+    raw_token: str
+    display_token: str
+    decoded_contribution: str
+    token_bytes: list[int] = Field(default_factory=list)
+    full_position: int = Field(..., ge=0)
+    source_category: CanonicalTokenSourceCategory
+    source_label: str
+    special_token: bool = False
+
+
+class GenerationContextMessage(BaseModel):
+    role: Literal["system", "user", "assistant"]
+    label: str
+    content: str
+    source: Literal[
+        "provider_default",
+        "composed_instructions",
+        "user_prompt",
+        "assistant_prefix",
+    ]
+    editable: bool = False
 
 
 class AlternativeCandidate(BaseModel):
@@ -165,6 +198,10 @@ class GenerationResponse(BaseModel):
     mode: str = Field(default="live")
     prompt_used: str
     prompt_token_ids: list[int] | None = None
+    prompt_tokens: list[CanonicalPromptToken] | None = None
+    context_messages: list[GenerationContextMessage] = Field(default_factory=list)
+    raw_context_text: str | None = None
+    system_prompt_editable: bool = False
     completion: str
     notes: str
     request: RequestEcho
