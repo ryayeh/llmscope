@@ -1547,9 +1547,9 @@ button {
 
 .llmscope-app {
   --shell-gap: 16px;
-  --dock-width: 248px;
+  --dock-width: 332px;
   --dock-collapsed-width: 92px;
-  --inspector-width: 284px;
+  --inspector-width: 320px;
   --content-left: calc(var(--shell-gap) + var(--dock-width) + 16px);
   --content-right: calc(var(--shell-gap) + var(--inspector-width) + 16px);
   --toolbar-top: 52px;
@@ -1773,8 +1773,8 @@ button {
 .llmscope-app .sentence-bar {
   top: var(--sentence-top);
   gap: 6px;
-  max-height: min(35vh, 340px);
-  padding: 8px 10px 10px;
+  max-height: min(40vh, 372px);
+  padding: 10px 12px 12px;
   border-radius: 14px;
   overflow: hidden;
 }
@@ -1871,7 +1871,8 @@ button {
   min-height: 0;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+  overflow: hidden;
 }
 
 .llmscope-app .sentence-bar--empty {
@@ -1929,11 +1930,39 @@ button {
   color: var(--text-primary);
 }
 
+.llmscope-app .reality-workspace__content {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+  scrollbar-width: thin;
+}
+
+.llmscope-app .reality-workspace__content::-webkit-scrollbar {
+  width: 12px;
+}
+
+.llmscope-app .reality-workspace__content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.llmscope-app .reality-workspace__content::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.24);
+  background-clip: padding-box;
+}
+
 .llmscope-app .reality-workspace__panel {
   display: flex;
   min-height: 0;
   flex-direction: column;
-  gap: 8px;
+  flex: 0 0 auto;
+  gap: 10px;
 }
 
 .llmscope-app .sentence-bar__details {
@@ -1985,11 +2014,9 @@ button {
 }
 
 .llmscope-app .reality-workspace__scroller {
-  max-height: 220px;
-  overflow: auto;
-  overscroll-behavior: contain;
-  padding-right: 2px;
-  scrollbar-width: thin;
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
 }
 
 .llmscope-app .reality-workspace__text {
@@ -2022,7 +2049,7 @@ button {
   gap: 6px;
   overflow-x: auto;
   overscroll-behavior-x: contain;
-  padding-bottom: 3px;
+  padding-bottom: 6px;
   scrollbar-width: thin;
 }
 
@@ -2035,6 +2062,10 @@ button {
 .llmscope-app .reality-workspace__detail-grid--summary {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   margin-top: 8px;
+}
+
+.llmscope-app .reality-workspace__detail-grid--statistics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .llmscope-app .reality-workspace__detail-grid div {
@@ -2065,8 +2096,9 @@ button {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding-top: 2px;
-  background: linear-gradient(180deg, transparent, rgba(7, 12, 24, 0.94) 22%);
+  padding-top: 8px;
+  background:
+    linear-gradient(180deg, rgba(7, 12, 24, 0), rgba(7, 12, 24, 0.9) 24%, rgba(7, 12, 24, 0.97));
 }
 
 .llmscope-app .reality-workspace__attention-hint {
@@ -2117,7 +2149,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 10px;
+  padding: 12px;
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.028);
 }
@@ -2165,8 +2197,8 @@ button {
 
 .llmscope-app .reality-conversation__body {
   color: var(--text-primary);
-  font-size: 12px;
-  line-height: 1.6;
+  font-size: 13px;
+  line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -2175,8 +2207,8 @@ button {
 .llmscope-app .reality-workspace__raw {
   margin: 0;
   color: var(--text-primary);
-  font-size: 12px;
-  line-height: 1.55;
+  font-size: 13px;
+  line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -2629,9 +2661,11 @@ button {
   min-height: 0;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   overflow-y: auto;
-  padding-right: 2px;
+  overscroll-behavior: contain;
+  padding-right: 6px;
+  padding-bottom: 12px;
   scrollbar-width: thin;
 }
 
@@ -2654,7 +2688,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 10px;
+  padding: 12px;
   border: 1px solid rgba(148, 163, 184, 0.08);
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.028);
@@ -2797,17 +2831,25 @@ button {
 }
 
 .llmscope-app .generation-panel__textarea {
-  min-height: 156px;
-  padding: 12px 13px;
+  min-height: 196px;
+  padding: 14px 15px;
   resize: vertical;
-  line-height: 1.5;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
-.llmscope-app .generation-panel__system-textarea {
-  min-height: 94px;
-  padding: 10px 12px;
-  resize: vertical;
-  line-height: 1.45;
+.llmscope-app .generation-panel__system-preview {
+  margin: 0;
+  min-height: 116px;
+  padding: 12px 14px;
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  background: var(--field-background);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .llmscope-app .generation-panel__prompt-meta {
@@ -3003,8 +3045,8 @@ button {
 }
 
 .llmscope-app .inspector-panel__content {
-  gap: 10px;
-  padding-right: 2px;
+  gap: 12px;
+  padding-right: 6px;
   scrollbar-width: thin;
 }
 
@@ -3258,14 +3300,14 @@ button {
 
 @media (max-width: 1360px) {
   .llmscope-app {
-    --dock-width: 224px;
-    --inspector-width: 260px;
+    --dock-width: 292px;
+    --inspector-width: 292px;
   }
 }
 
 @media (max-width: 1040px) {
   .llmscope-app {
-    --dock-width: min(228px, calc(100vw - 32px));
+    --dock-width: min(292px, calc(100vw - 32px));
     --content-left: 16px;
     --content-right: 16px;
     --toolbar-top: 72px;
@@ -3278,11 +3320,11 @@ button {
   }
 
   .llmscope-app .explorer-dock {
-    width: min(228px, calc(100vw - 32px));
+    width: min(292px, calc(100vw - 32px));
   }
 
   .llmscope-app .generation-panel {
-    width: min(228px, calc(100vw - 32px));
+    width: min(292px, calc(100vw - 32px));
   }
 
   .llmscope-app .inspector-panel {
@@ -3295,6 +3337,10 @@ button {
   }
 
   .llmscope-app .reality-workspace__detail-grid--summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .llmscope-app .reality-workspace__detail-grid--statistics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -3362,6 +3408,7 @@ button {
   .llmscope-app .generation-panel__field-grid,
   .llmscope-app .generation-panel__status-grid,
   .llmscope-app .reality-workspace__detail-grid,
+  .llmscope-app .reality-workspace__detail-grid--statistics,
   .llmscope-app .reality-workspace__detail-grid--summary {
     grid-template-columns: minmax(0, 1fr);
   }

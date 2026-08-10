@@ -836,7 +836,8 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
               </button>
             </div>
 
-            <div className="reality-workspace__panel">
+            <div className="reality-workspace__content">
+              <div className="reality-workspace__panel">
               {activeTab === "conversation" ? (
                 <div className="reality-workspace__scroller">
                   <div className="reality-conversation">
@@ -1024,7 +1025,7 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
               ) : null}
 
               {activeTab === "statistics" ? (
-                <div className="reality-workspace__detail-grid">
+                <div className="reality-workspace__detail-grid reality-workspace__detail-grid--statistics">
                   <div>
                     <dt>Probability</dt>
                     <dd>{formatMetricPercent(stats.displayProbability, supportsLogprobs)}</dd>
@@ -1078,64 +1079,65 @@ export const CurrentRealityPanel = memo(function CurrentRealityPanel({
               ) : null}
             </div>
 
-            <div className="reality-workspace__strip">
-              <div className="reality-workspace__panel-header">
-                <p className="reality-workspace__panel-label">
-                  {stripUsesAttention ? "Attention strip" : "Pinned token strip"}
-                </p>
-                {stripUsesAttention && attentionHint ? (
-                  <span className="reality-workspace__attention-hint" title={attentionHint}>
-                    Attention Lens
-                  </span>
-                ) : null}
-              </div>
-              <div className="reality-workspace__strip-track">
-                {stripUsesAttention ? (
-                  attentionTokens.map((token) => (
-                    <button
-                      key={token.id}
-                      className={`sentence-token sentence-token--attention${
-                        token.sequenceScope === "prompt" ? " sentence-token--prompt-scope" : ""
-                      }${token.isQuery ? " sentence-token--query" : ""}${
-                        token.isPinned ? " sentence-token--attention-pinned" : ""
-                      }`}
-                      onClick={() => onToggleAttentionPin?.(token.id)}
-                      style={
-                        {
-                          "--attention-weight": `${Math.max(token.attentionWeight ?? 0, 0)}`,
-                        } as CSSProperties
-                      }
-                      title={`${token.displayToken || token.decodedContribution || token.rawToken}
+              <div className="reality-workspace__strip">
+                <div className="reality-workspace__panel-header">
+                  <p className="reality-workspace__panel-label">
+                    {stripUsesAttention ? "Attention strip" : "Pinned token strip"}
+                  </p>
+                  {stripUsesAttention && attentionHint ? (
+                    <span className="reality-workspace__attention-hint" title={attentionHint}>
+                      Attention Lens
+                    </span>
+                  ) : null}
+                </div>
+                <div className="reality-workspace__strip-track">
+                  {stripUsesAttention ? (
+                    attentionTokens.map((token) => (
+                      <button
+                        key={token.id}
+                        className={`sentence-token sentence-token--attention${
+                          token.sequenceScope === "prompt" ? " sentence-token--prompt-scope" : ""
+                        }${token.isQuery ? " sentence-token--query" : ""}${
+                          token.isPinned ? " sentence-token--attention-pinned" : ""
+                        }`}
+                        onClick={() => onToggleAttentionPin?.(token.id)}
+                        style={
+                          {
+                            "--attention-weight": `${Math.max(token.attentionWeight ?? 0, 0)}`,
+                          } as CSSProperties
+                        }
+                        title={`${token.displayToken || token.decodedContribution || token.rawToken}
 Weight: ${
-                        typeof token.attentionWeight === "number"
-                          ? formatPercent(token.attentionWeight)
-                          : "Unavailable"
-                      }
+                          typeof token.attentionWeight === "number"
+                            ? formatPercent(token.attentionWeight)
+                            : "Unavailable"
+                        }
 Position: ${token.fullPosition}`}
-                      type="button"
-                    >
-                      {token.displayToken || token.decodedContribution || token.rawToken}
-                    </button>
-                  ))
-                ) : assistantGroupTokens.length > 0 ? (
-                  assistantGroupTokens.map((token) =>
-                    renderInteractiveToken(token, {
-                      chipRef: true,
-                      className: "sentence-token",
-                      style: {
-                        "--sentence-strength": `${
-                          token.supportsLogprobs
-                            ? Math.max(token.displayProbability ?? 0, 0.08)
-                            : 0.38
-                        }`,
-                      } as CSSProperties,
-                    }),
-                  )
-                ) : (
-                  <span className="sentence-bar__placeholder">
-                    Generate a response, then click around the graph to switch realities.
-                  </span>
-                )}
+                        type="button"
+                      >
+                        {token.displayToken || token.decodedContribution || token.rawToken}
+                      </button>
+                    ))
+                  ) : assistantGroupTokens.length > 0 ? (
+                    assistantGroupTokens.map((token) =>
+                      renderInteractiveToken(token, {
+                        chipRef: true,
+                        className: "sentence-token",
+                        style: {
+                          "--sentence-strength": `${
+                            token.supportsLogprobs
+                              ? Math.max(token.displayProbability ?? 0, 0.08)
+                              : 0.38
+                          }`,
+                        } as CSSProperties,
+                      }),
+                    )
+                  ) : (
+                    <span className="sentence-bar__placeholder">
+                      Generate a response, then click around the graph to switch realities.
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
           </>

@@ -93,6 +93,11 @@ interface BuildAttentionFocusNodeIdsParams {
   sourceGraphNodeIds: Array<string | null>;
 }
 
+interface ResolvePromptAnchorNodeParams {
+  activePathIds: string[];
+  displayNodes: TokenFlowNode[];
+}
+
 export interface PromptDisplayNodeSummary {
   promptNodeCount: number;
   promptNodeIds: string[];
@@ -156,6 +161,58 @@ export function summarizePromptDisplayNodes(
     promptNodeIds,
     promptSummaryCount: displayNodes.filter((node) => node.id === "root").length,
   };
+}
+
+export function resolvePromptAnchorNode(
+  params: ResolvePromptAnchorNodeParams,
+): TokenFlowNode | null {
+  const visibleTokenNodes = params.displayNodes.filter(
+    (node) =>
+      node.id !== "root" &&
+      !node.hidden &&
+      node.data.kind === "token" &&
+      Number.isFinite(node.position.x) &&
+      Number.isFinite(node.position.y),
+  );
+
+  if (visibleTokenNodes.length === 0) {
+    return null;
+  }
+
+  const nodeById = new Map(visibleTokenNodes.map((node) => [node.id, node]));
+  const activeRootChildId = params.activePathIds[1] ?? null;
+  const activeRootChild = activeRootChildId ? nodeById.get(activeRootChildId) ?? null : null;
+
+  if (activeRootChild) {
+    return activeRootChild;
+  }
+
+  const visiblePathToken = params.activePathIds
+    .slice(1)
+    .map((nodeId) => nodeById.get(nodeId) ?? null)
+    .find((node): node is TokenFlowNode => Boolean(node));
+
+  if (visiblePathToken) {
+    return visiblePathToken;
+  }
+
+  const visibleRootChildren = visibleTokenNodes
+    .filter((node) => node.data.parentId === "root")
+    .sort(
+      (left, right) =>
+        left.position.x - right.position.x || left.position.y - right.position.y,
+    );
+
+  if (visibleRootChildren.length > 0) {
+    return visibleRootChildren[0] ?? null;
+  }
+
+  return (
+    [...visibleTokenNodes].sort(
+      (left, right) =>
+        left.position.x - right.position.x || left.position.y - right.position.y,
+    )[0] ?? null
+  );
 }
 
 export function layoutPromptTokenLane(

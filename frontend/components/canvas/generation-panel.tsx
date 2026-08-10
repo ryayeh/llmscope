@@ -314,12 +314,12 @@ export function GenerationPanel({
                   {systemPromptState.sourceLabel}
                 </span>
               ) : null}
-              <textarea
+              <pre
                 aria-label="System instructions"
-                className="generation-panel__system-textarea"
-                readOnly
-                value={systemPromptState.content ?? systemPromptState.helper}
-              />
+                className="generation-panel__system-preview"
+              >
+                {systemPromptState.content ?? systemPromptState.helper}
+              </pre>
               <p className="generation-panel__system-helper">{systemPromptState.helper}</p>
             </div>
           </details>

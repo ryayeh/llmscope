@@ -22,6 +22,7 @@ import {
   Camera,
   ChevronLeft,
   ChevronRight,
+  LoaderCircle,
   Pause,
   Play,
   Redo2,
@@ -70,8 +71,10 @@ import {
   canMutateGraphTokenNode,
   isPromptTokenNodeId,
   layoutPromptTokenLane,
+  resolvePromptAnchorNode,
   summarizePromptDisplayNodes,
 } from "@/lib/attention-lens";
+import { shouldReuseContinuationTarget } from "@/lib/continuation-flow";
 import {
   buildBranchBreadcrumb,
   buildConversationSections,
@@ -268,7 +271,7 @@ const PROMPT_ROW_GAP = 14;
 const PROMPT_MAX_ROW_WIDTH = 1180;
 const PROMPT_OUTPUT_GAP = 28;
 const ATTENTION_FOCUS_PADDING = 0.08;
-const ATTENTION_FOCUS_MIN_ZOOM = 0.6;
+const ATTENTION_FOCUS_MIN_ZOOM = 0.7;
 const ATTENTION_FOCUS_MAX_ZOOM = 1.15;
 const ATTENTION_FOCUS_DURATION_MS = 360;
 const PROMPT_MAX_DISTANCE_FROM_OUTPUT = 2200;
@@ -318,6 +321,24 @@ interface ContinuationPreviewState {
   nodeId: string;
   steps: number;
   validation: ReturnType<typeof buildContinuationValidation>;
+}
+
+interface ContinuationStepResult {
+  errorMessage: string | null;
+  requested: boolean;
+  success: boolean;
+}
+
+interface ContinueGenerationOptions {
+  forceRequestFirstStep?: boolean;
+  source?: "graph" | "preview-modal";
+}
+
+interface ContinueGenerationResult {
+  errorMessage: string | null;
+  finalNodeId: string;
+  requested: boolean;
+  success: boolean;
 }
 
 interface DragPerformanceStats {
@@ -2273,6 +2294,8 @@ function Workspace() {
   const [requestVariation, setRequestVariation] = useState(0);
   const [changedTokenIndexes, setChangedTokenIndexes] = useState<number[]>([]);
   const [continuationPreview, setContinuationPreview] = useState<ContinuationPreviewState | null>(null);
+  const [continuationPreviewError, setContinuationPreviewError] = useState<string | null>(null);
+  const [isSubmittingContinuationPreview, setIsSubmittingContinuationPreview] = useState(false);
   const [huggingFaceLocalStatus, setHuggingFaceLocalStatus] =
     useState<HuggingFaceLocalStatusResponse | null>(null);
   const [attentionLensEnabled, setAttentionLensEnabled] = useState(false);
@@ -2790,26 +2813,10 @@ function Workspace() {
     }
 
     const rootNode = displayGraphNodes.find((node) => node.id === "root") ?? null;
-    const promptAnchorNode =
-      displayGraphNodes
-        .filter(
-          (node) =>
-            node.id !== "root" &&
-            !node.hidden &&
-            node.data.kind === "token" &&
-            node.data.parentId === "root",
-        )
-        .sort(
-          (left, right) =>
-            left.position.x - right.position.x || left.position.y - right.position.y,
-        )[0] ??
-      displayGraphNodes
-        .filter((node) => node.id !== "root" && !node.hidden && node.data.kind === "token")
-        .sort(
-          (left, right) =>
-            left.position.x - right.position.x || left.position.y - right.position.y,
-        )[0] ??
-      null;
+    const promptAnchorNode = resolvePromptAnchorNode({
+      activePathIds,
+      displayNodes: displayGraphNodes,
+    });
 
     if (!rootNode || !promptAnchorNode) {
       return [];
@@ -2906,12 +2913,13 @@ function Workspace() {
   }, [
     attentionRelatedNodeIdSet,
     displayGraphNodes,
-    generationPromptTokens,
-    hoveredRelatedIdSet,
-    pinnedSet,
-    promptTokensVisible,
-    selectedNodeId,
-    tokenDisplayMode,
+      generationPromptTokens,
+      hoveredRelatedIdSet,
+      pinnedSet,
+      promptTokensVisible,
+      activePathIds,
+      selectedNodeId,
+      tokenDisplayMode,
   ]);
   const displayNodes = useMemo<TokenFlowNode[]>(
     () => [
@@ -5271,21 +5279,35 @@ function Workspace() {
   async function requestContinuationStep(
     nodeId: string,
     validation: ReturnType<typeof buildContinuationValidation>,
-  ) {
+  ): Promise<ContinuationStepResult> {
     const node = nodesRef.current.find((currentNode) => currentNode.id === nodeId);
 
     if (!canMutateGraphTokenNode(node)) {
-      setErrorMessage("Prompt tokens are fixed input context and cannot continue generation.");
-      return false;
+      const message = "Prompt tokens are fixed input context and cannot continue generation.";
+      setErrorMessage(message);
+      return {
+        errorMessage: message,
+        requested: false,
+        success: false,
+      };
     }
 
     if (node.data.status === "loading") {
-      return false;
+      return {
+        errorMessage: null,
+        requested: false,
+        success: false,
+      };
     }
 
     if (!node.data.providerCapabilities.supports_continuation) {
-      setErrorMessage("This provider does not support graph continuation from the selected node.");
-      return false;
+      const message = "This provider does not support graph continuation from the selected node.";
+      setErrorMessage(message);
+      return {
+        errorMessage: message,
+        requested: false,
+        success: false,
+      };
     }
 
     applyTransition(
@@ -5306,44 +5328,55 @@ function Workspace() {
       { pushHistory: false },
     );
 
+    const requestBody = {
+      root_prompt: validation.rootPrompt,
+      provider: node.data.metadata.provider ?? generation?.request.provider ?? selectedProvider,
+      model: node.data.requestModel,
+      preset: node.data.requestPreset,
+      temperature: node.data.requestTemperature,
+      top_p: node.data.requestTopP,
+      parent_node_id: nodeId,
+      parent_token: node.data.tokenText,
+      assistant_prefix: validation.assistantPrefix,
+      prompt_token_ids: validation.promptTokenIds,
+      canonical_prefix_token_ids: validation.canonicalPrefixTokenIds,
+      generated_prefix_token_ids: validation.generatedPrefixTokenIds,
+      reconstructed_prompt: validation.reconstructedPrompt,
+      expected_prompt_length: validation.characterLength,
+      expected_utf8_length: validation.utf8Length,
+      expected_assistant_prefix_length: validation.assistantCharacterLength,
+      expected_assistant_prefix_utf8_length: validation.assistantUtf8Length,
+      expected_token_count: validation.tokenCount,
+      selected_token_id: validation.selectedTokenId,
+      selected_tokenizer_id: validation.selectedTokenizerId,
+      model_revision: validation.modelRevision,
+      tokenizer_identity: validation.tokenizerIdentity,
+      tokenizer_revision: validation.tokenizerRevision,
+      depth: node.data.depth,
+      cumulative_probability: node.data.cumulativeProbability,
+      variation: node.data.requestVariation,
+      max_children: MAX_BRANCH_CHILDREN,
+      demo_mode: node.data.requestDemoMode,
+      cached_segment_id: readMetadataString(node.data.metadata, "cached_segment_id"),
+      cached_token_index: readMetadataNumber(node.data.metadata, "next_cached_token_index"),
+    };
+    logContinuationDebug("continue-handler:request-built", {
+      apiUrl: "/api/continue-node",
+      nodeId,
+      requestBody,
+    });
+
     try {
+      logContinuationDebug("continue-handler:fetch-started", {
+        apiUrl: "/api/continue-node",
+        nodeId,
+      });
       const response = await fetch("/api/continue-node", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          root_prompt: validation.rootPrompt,
-          provider: node.data.metadata.provider ?? generation?.request.provider ?? selectedProvider,
-          model: node.data.requestModel,
-          preset: node.data.requestPreset,
-          temperature: node.data.requestTemperature,
-          top_p: node.data.requestTopP,
-          parent_node_id: nodeId,
-          parent_token: node.data.tokenText,
-          assistant_prefix: validation.assistantPrefix,
-          prompt_token_ids: validation.promptTokenIds,
-          canonical_prefix_token_ids: validation.canonicalPrefixTokenIds,
-          generated_prefix_token_ids: validation.generatedPrefixTokenIds,
-          reconstructed_prompt: validation.reconstructedPrompt,
-          expected_prompt_length: validation.characterLength,
-          expected_utf8_length: validation.utf8Length,
-          expected_assistant_prefix_length: validation.assistantCharacterLength,
-          expected_assistant_prefix_utf8_length: validation.assistantUtf8Length,
-          expected_token_count: validation.tokenCount,
-          selected_token_id: validation.selectedTokenId,
-          selected_tokenizer_id: validation.selectedTokenizerId,
-          model_revision: validation.modelRevision,
-          tokenizer_identity: validation.tokenizerIdentity,
-          tokenizer_revision: validation.tokenizerRevision,
-          depth: node.data.depth,
-          cumulative_probability: node.data.cumulativeProbability,
-          variation: node.data.requestVariation,
-          max_children: MAX_BRANCH_CHILDREN,
-          demo_mode: node.data.requestDemoMode,
-          cached_segment_id: readMetadataString(node.data.metadata, "cached_segment_id"),
-          cached_token_index: readMetadataNumber(node.data.metadata, "next_cached_token_index"),
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -5351,21 +5384,42 @@ function Workspace() {
       }
 
       const payload = (await response.json()) as ContinueGenerationResponse;
+      logContinuationDebug("continue-handler:response", {
+        action: payload.action,
+        childIds: payload.children.map((candidate) => candidate.id),
+        continuationMode: payload.continuation_mode,
+        nodeId,
+        remainingCachedTokens: payload.remaining_cached_tokens,
+      });
       const parentNode = nodesRef.current.find((currentNode) => currentNode.id === nodeId);
 
       if (!parentNode) {
-        return false;
+        return {
+          errorMessage:
+            "The continuation parent node disappeared before the response could be merged.",
+          requested: true,
+          success: false,
+        };
       }
 
       applyExpansionPayloadToCanvas(nodeId, parentNode, validation, payload, { pushHistory: false });
       setBackendState("online");
-      return true;
+      return {
+        errorMessage: null,
+        requested: true,
+        success: true,
+      };
     } catch (error) {
       const errorCode = getErrorCode(error);
+      const message =
+        error instanceof Error ? error.message : "Unable to continue the selected branch.";
       setBackendState(errorCode === "PROVIDER_REQUEST_FAILED" ? "offline" : "online");
-      setErrorMessage(
-        error instanceof Error ? error.message : "Unable to continue the selected branch.",
-      );
+      setErrorMessage(message);
+      logContinuationDebug("continue-handler:error", {
+        errorCode,
+        message,
+        nodeId,
+      });
       applyTransition(
         {
           nodes: nodesRef.current.map((currentNode) =>
@@ -5382,17 +5436,39 @@ function Workspace() {
         },
         { pushHistory: false },
       );
-      return false;
+      return {
+        errorMessage: message,
+        requested: true,
+        success: false,
+      };
     }
   }
 
-  async function continueGenerationFrom(nodeId: string, steps: number) {
+  async function continueGenerationFrom(
+    nodeId: string,
+    steps: number,
+    options?: ContinueGenerationOptions,
+  ): Promise<ContinueGenerationResult> {
     let currentNodeId = nodeId;
+    let requested = false;
 
     for (let step = 0; step < steps; step += 1) {
       const existingTarget = getPreferredContinuationTarget(currentNodeId);
 
-      if (existingTarget) {
+      if (
+        shouldReuseContinuationTarget({
+          forceRequestFirstStep: options?.forceRequestFirstStep,
+          hasExistingTarget: Boolean(existingTarget),
+          stepIndex: step,
+        }) &&
+        existingTarget
+      ) {
+        logContinuationDebug("continue-handler:reused-existing-target", {
+          currentNodeId,
+          existingTarget,
+          source: options?.source ?? "graph",
+          step,
+        });
         currentNodeId = existingTarget;
         activateReality(currentNodeId, { pushHistory: false });
         continue;
@@ -5401,25 +5477,43 @@ function Workspace() {
       const validation = buildContinuationValidation(tokenGraphRef.current, currentNodeId);
 
       if (!validation.isValid) {
-        setErrorMessage(validation.warnings.join(" "));
+        const message = validation.warnings.join(" ");
+        setErrorMessage(message);
         setContinuationPreview({
           nodeId: currentNodeId,
           steps: Math.max(1, steps - step),
           validation,
         });
-        break;
+        return {
+          errorMessage: message,
+          finalNodeId: currentNodeId,
+          requested,
+          success: false,
+        };
       }
 
       const expanded = await requestContinuationStep(currentNodeId, validation);
+      requested = requested || expanded.requested;
 
-      if (!expanded) {
-        break;
+      if (!expanded.success) {
+        return {
+          errorMessage: expanded.errorMessage,
+          finalNodeId: currentNodeId,
+          requested,
+          success: false,
+        };
       }
 
       const nextTarget = getPreferredContinuationTarget(currentNodeId);
 
       if (!nextTarget) {
-        break;
+        pushHistorySnapshot(getCurrentSnapshot());
+        return {
+          errorMessage: null,
+          finalNodeId: currentNodeId,
+          requested,
+          success: true,
+        };
       }
 
       currentNodeId = nextTarget;
@@ -5427,6 +5521,12 @@ function Workspace() {
     }
 
     pushHistorySnapshot(getCurrentSnapshot());
+    return {
+      errorMessage: null,
+      finalNodeId: currentNodeId,
+      requested,
+      success: true,
+    };
   }
 
   function togglePin(nodeId: string) {
@@ -5498,11 +5598,86 @@ function Workspace() {
 
     const validation = buildContinuationValidation(tokenGraphRef.current, nodeId);
     setSelectedNodeId(nodeId);
+    setContinuationPreviewError(null);
+    setIsSubmittingContinuationPreview(false);
     setContinuationPreview({
       nodeId,
       steps,
       validation,
     });
+  }
+
+  async function handleSubmitContinuationPreview() {
+    logContinuationDebug("continue-button:click", {
+      nodeId: continuationPreview?.nodeId ?? null,
+      pending: isSubmittingContinuationPreview,
+      steps: continuationPreview?.steps ?? 0,
+    });
+    const pending = continuationPreview;
+
+    if (!pending) {
+      return;
+    }
+
+    const previewNode = tokenGraphRef.current.nodesById[pending.nodeId] ?? null;
+    logContinuationDebug("continue-handler:entered", {
+      attentionLoading,
+      model: previewNode?.requestModel ?? null,
+      nodeId: pending.nodeId,
+      pending: isSubmittingContinuationPreview,
+      provider: readMetadataString(previewNode?.metadata ?? null, "provider"),
+      steps: pending.steps,
+      validationMode: pending.validation.validationMode,
+    });
+
+    if (isSubmittingContinuationPreview) {
+      return;
+    }
+
+    if (!pending.validation.isValid) {
+      const message =
+        pending.validation.warnings.join(" ") ||
+        "Continuation is unavailable because the selected prefix failed validation.";
+      setContinuationPreviewError(message);
+      logContinuationDebug("continue-handler:validation", {
+        isValid: false,
+        message,
+        nodeId: pending.nodeId,
+      });
+      return;
+    }
+
+    setContinuationPreviewError(null);
+    setErrorMessage(null);
+    setIsSubmittingContinuationPreview(true);
+    logContinuationDebug("continue-handler:validation", {
+      assistantPrefix: pending.validation.assistantPrefix,
+      isValid: true,
+      nodeId: pending.nodeId,
+      tokenCount: pending.validation.tokenCount,
+    });
+
+    const result = await continueGenerationFrom(pending.nodeId, pending.steps, {
+      forceRequestFirstStep: true,
+      source: "preview-modal",
+    });
+
+    logContinuationDebug("continue-handler:finished", {
+      errorMessage: result.errorMessage,
+      finalNodeId: result.finalNodeId,
+      requested: result.requested,
+      success: result.success,
+    });
+    setIsSubmittingContinuationPreview(false);
+
+    if (result.success) {
+      setContinuationPreview(null);
+      return;
+    }
+
+    setContinuationPreviewError(
+      result.errorMessage ?? "Unable to continue the selected branch from this node.",
+    );
   }
 
   function startCompare(nodeId: string) {
@@ -6123,7 +6298,11 @@ function Workspace() {
             </div>
             <button
               className="icon-button"
-              onClick={() => setContinuationPreview(null)}
+              disabled={isSubmittingContinuationPreview}
+              onClick={() => {
+                setContinuationPreview(null);
+                setContinuationPreviewError(null);
+              }}
               type="button"
             >
               Close
@@ -6192,27 +6371,54 @@ function Workspace() {
                 </div>
               </div>
             ) : null}
+
+            {continuationPreviewError ? (
+              <div className="continuation-preview__warnings">
+                <p>{continuationPreviewError}</p>
+              </div>
+            ) : null}
+
+            {isSubmittingContinuationPreview ? (
+              <div className="continuation-preview__ok">
+                {`Continuing from "${continuationPreview.validation.assistantPrefix || "<empty>"}"...`}
+              </div>
+            ) : null}
           </div>
 
           <div className="continuation-preview__actions">
             <button
               className="explorer-button explorer-button--ghost"
-              onClick={() => setContinuationPreview(null)}
+              disabled={isSubmittingContinuationPreview}
+              onClick={() => {
+                setContinuationPreview(null);
+                setContinuationPreviewError(null);
+              }}
               type="button"
             >
               Cancel
             </button>
             <button
               className="explorer-button explorer-button--primary"
-              disabled={!continuationPreview.validation.isValid}
+              disabled={!continuationPreview.validation.isValid || isSubmittingContinuationPreview}
               onClick={() => {
-                const pending = continuationPreview;
-                setContinuationPreview(null);
-                void continueGenerationFrom(pending.nodeId, pending.steps);
+                void handleSubmitContinuationPreview();
+              }}
+              onPointerDown={() => {
+                logContinuationDebug("continue-button:pointer-down", {
+                  nodeId: continuationPreview.nodeId,
+                  steps: continuationPreview.steps,
+                });
               }}
               type="button"
             >
-              Continue
+              {isSubmittingContinuationPreview ? (
+                <>
+                  <LoaderCircle className="h-4 w-4 animate-spin" />
+                  Continuing...
+                </>
+              ) : (
+                "Continue"
+              )}
             </button>
           </div>
         </div>

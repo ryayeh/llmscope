@@ -1,0 +1,144 @@
+{
+  "console": [
+    {
+      "type": "info",
+      "text": "%cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold"
+    },
+    {
+      "type": "debug",
+      "text": "[llmscope-perf] graph-size {nodeCount: 0, edgeCount: 0}"
+    },
+    {
+      "type": "debug",
+      "text": "[llmscope-perf] graph-size {nodeCount: 1, edgeCount: 0}"
+    },
+    {
+      "type": "debug",
+      "text": "[llmscope-perf] graph-size {nodeCount: 2, edgeCount: 1}"
+    },
+    {
+      "type": "debug",
+      "text": "[llmscope-perf] graph-size {nodeCount: 3, edgeCount: 2}"
+    },
+    {
+      "type": "debug",
+      "text": "[llmscope-perf] graph-size {nodeCount: 4, edgeCount: 3}"
+    },
+    {
+      "type": "debug",
+      "text": "[llmscope-perf] graph-size {nodeCount: 5, edgeCount: 4}"
+    }
+  ],
+  "requests": [
+    {
+      "method": "GET",
+      "url": "http://localhost:3000/api/health",
+      "postData": null
+    },
+    {
+      "method": "GET",
+      "url": "http://localhost:3000/api/models",
+      "postData": null
+    },
+    {
+      "method": "GET",
+      "url": "http://localhost:3000/api/providers/hugging-face-local",
+      "postData": null
+    },
+    {
+      "method": "POST",
+      "url": "http://localhost:3000/api/generate",
+      "postData": "{\"prompt\":\"Red key: APPLE\\nBlue key: OCEAN\\nGreen key: FOREST\\n\\nReturn only the value of the blue key.\",\"provider\":\"hugging_face\",\"model\":\"Qwen/Qwen2.5-3B-Instruct\",\"preset\":\"general\",\"temperature\":0,\"top_p\":1,\"max_tokens\":256,\"variation\":1,\"demo_mode\":false}"
+    }
+  ],
+  "responses": [
+    {
+      "status": 200,
+      "url": "http://localhost:3000/api/health"
+    },
+    {
+      "status": 200,
+      "url": "http://localhost:3000/api/models"
+    },
+    {
+      "status": 200,
+      "url": "http://localhost:3000/api/providers/hugging-face-local"
+    },
+    {
+      "status": 200,
+      "url": "http://localhost:3000/api/generate"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "root",
+      "text": "Prompt summaryGenerated outputInput tokenGenerated output | Input tokenRawRed key: APPLE Blue key: OCEAN Green key: FOREST Return only the value of the blue key.ShownPrompt summaryShown pInput tokenRaw pInput tokenBytes82 101 100 32 107 101 121 58 32 65 80 80 76 69 10 66 108 117 101 32 107 101 121 58 32 79 67 69 65 78 10 71 114 101 101 110 32 107 101 121 58 32 70 79 82 69 83 84 10 10 82 101 116 117 114 110 32 111 110 108 121 32 116 104 101 32 118 97 108 117 101 32 111 102 32 116 104 101 32 98 108 117 101 32 107 101 121 46UTF-888Chars88Lead ws0Trail ws0Tokenizer-Prompt token metadata only",
+      "rect": {
+        "x": 122,
+        "y": 451.46136474609375,
+        "width": 92.45454406738281,
+        "height": 97.19769287109375,
+        "top": 451.46136474609375,
+        "right": 214.4545440673828,
+        "bottom": 548.6590576171875,
+        "left": 122
+      }
+    },
+    {
+      "id": "main:0:023900f4",
+      "text": "OSelected78.0%78.0% | RawRawOShownOShown p78.0%Raw p78.0%Bytes79UTF-81Chars1Lead ws0Trail ws0Tokenizer46ODouble-click to expand alternatives",
+      "rect": {
+        "x": 477.9499816894531,
+        "y": 456.0841064453125,
+        "width": 126.35458374023438,
+        "height": 80.63287353515625,
+        "top": 456.0841064453125,
+        "right": 604.3045654296875,
+        "bottom": 536.7169799804688,
+        "left": 477.9499816894531
+      }
+    },
+    {
+      "id": "main:1:05c4018a",
+      "text": "CESelected100.0%100.0% | RawRawCEShownCEShown p100.0%Raw p100.0%Bytes67 69UTF-82Chars2Lead ws0Trail ws0Tokenizer2104OCEDouble-click to expand alternatives",
+      "rect": {
+        "x": 769.1818237304688,
+        "y": 456.0841064453125,
+        "width": 126.3544921875,
+        "height": 80.63287353515625,
+        "top": 456.0841064453125,
+        "right": 895.5363159179688,
+        "bottom": 536.7169799804688,
+        "left": 769.1818237304688
+      }
+    },
+    {
+      "id": "main:2:05e50197",
+      "text": "ANSelected100.0%100.0% | RawRawANShownANShown p100.0%Raw p100.0%Bytes65 78UTF-82Chars2Lead ws0Trail ws0Tokenizer1093OCEANDouble-click to expand alternatives",
+      "rect": {
+        "x": 1060.41357421875,
+        "y": 456.0841064453125,
+        "width": 126.3546142578125,
+        "height": 80.63287353515625,
+        "top": 456.0841064453125,
+        "right": 1186.7681884765625,
+        "bottom": 536.7169799804688,
+        "left": 1060.41357421875
+      }
+    },
+    {
+      "id": "main:3:2957054f",
+      "text": "<|im_end|>Selected100.0%100.0% | RawRaw<|im_end|>Shown<|im_end|>Shown p100.0%Raw p100.0%Bytes60 124 105 109 95 101 110 100 124 62UTF-810Chars10Lead ws0Trail ws0Tokenizer151645OCEAN<|im_end|>Double-click to expand alternatives",
+      "rect": {
+        "x": 1351.6453857421875,
+        "y": 456.0841064453125,
+        "width": 126.3546142578125,
+        "height": 80.63287353515625,
+        "top": 456.0841064453125,
+        "right": 1478,
+        "bottom": 536.7169799804688,
+        "left": 1351.6453857421875
+      }
+    }
+  ]
+}

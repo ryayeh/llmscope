@@ -15,6 +15,7 @@ import {
   canMutateGraphTokenNode,
   isPromptTokenNodeId,
   layoutPromptTokenLane,
+  resolvePromptAnchorNode,
   summarizePromptDisplayNodes,
 } from "../lib/attention-lens";
 import type {
@@ -523,6 +524,58 @@ test("summarizePromptDisplayNodes enforces collapsed and expanded prompt-node in
     promptNodeIds: ["prompt-token-0", "prompt-token-1"],
     promptSummaryCount: 0,
   });
+});
+
+test("resolvePromptAnchorNode prefers the active-path first token over higher visible root siblings", () => {
+  const selectedFirstToken = {
+    ...makeTokenNode({
+      parentId: "root",
+      predictionId: "pred-o",
+      tokenIndex: 0,
+      tokenText: "O",
+      displayTokenText: "O",
+      decodedContribution: "O",
+      rank: 1,
+    }),
+    id: "main:0",
+    hidden: false,
+    position: { x: 120, y: 24 },
+  } as TokenFlowNode;
+  const higherAlternative = {
+    ...makeTokenNode({
+      parentId: "root",
+      predictionId: "pred-alt",
+      tokenIndex: 0,
+      tokenText: "BLUE",
+      displayTokenText: "BLUE",
+      decodedContribution: "BLUE",
+      rank: 2,
+    }),
+    id: "root:0:alt",
+    hidden: false,
+    position: { x: 120, y: -960 },
+  } as TokenFlowNode;
+  const laterActiveToken = {
+    ...makeTokenNode({
+      parentId: "main:0",
+      predictionId: "pred-ce",
+      tokenIndex: 1,
+      tokenText: "CE",
+      displayTokenText: "CE",
+      decodedContribution: "CE",
+      rank: 1,
+    }),
+    id: "main:1",
+    hidden: false,
+    position: { x: 320, y: 24 },
+  } as TokenFlowNode;
+
+  const anchor = resolvePromptAnchorNode({
+    activePathIds: ["root", "main:0", "main:1"],
+    displayNodes: [higherAlternative, selectedFirstToken, laterActiveToken],
+  });
+
+  assert.equal(anchor?.id, "main:0");
 });
 
 test("buildAttentionFocusNodeIds excludes hidden and stale nodes from attention fitting", () => {

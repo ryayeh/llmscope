@@ -1,0 +1,22 @@
+{
+  "before": {
+    "modalText": "CONTINUATION CHECK\n\nContinue branch\nClose\n\nORIGINAL PROMPT\n\nRed key: APPLE\nBlue key: OCEAN\nGreen key: FOREST\n\nReturn only the value of the blue key.\n\nRECONSTRUCTED CONTINUATION PREFIX\n\nOCE\n2 tokens\n3 chars\n3 bytes\n\nEXPECTED ASSISTANT PREFIX\n\nOCE\nRaw-token reconstruction matches the stored graph context.\nQwen/Qwen2.5-3B-Instruct\ntemp 0\ntop_p 1\nlive\n\nGENERATION HISTORY\n\nQwen/Qwen2.5-3B-Instruct · 2026-08-10T04:39:48.281274Z\nCancel\nContinue",
+    "buttonDisabled": false,
+    "buttonText": "Continue",
+    "requestCountBefore": 0
+  },
+  "after": {
+    "modalOpen": 0,
+    "requestCountAfter": 1,
+    "errorText": null,
+    "selectedInspectorText": "INSPECTOR\n\nAN\n\nBASIC\n\nCHOSEN TOKEN\nAN\nPROBABILITY\n100.0%\nMODE\nRaw\nCONTINUATION\nMode: Exact\nRANK\n1\nENTROPY\n0.0000\nLATENCY\n208 ms\nTOP-K COVERAGE\n100.0%\nPROVIDER\nHugging Face Local\nMODEL\nQwen/Qwen2.5-3B-Instruct\n\nCONTEXT\n\nBEFORE TOKEN\nOCE\n\nTHROUGH TOKEN\nAN\n\nINTERPRETATION\nAfter \"AN\", \"AN\" had the highest returned probability among the returned candidates, ahead of \"an\" by +100.0%.\n\nATTENTION LENS\n\nPrediction\nLayer 35\nEnable Attention Lens\nShow prompt tokens\n\nTOP ALTERNATIVES\n\nRaw\nOther tokens 0.0%\nAN\n100.0%\nChosen\nan\n0.0%\n+100.0%\n!\n0.0%\n+100.0%\n\"\n0.0%\n+100.0%\nAdvanced",
+    "responseStatus": 200
+  },
+  "continueRequests": [
+    {
+      "method": "POST",
+      "url": "http://localhost:3000/api/continue-node",
+      "postData": "{\"root_prompt\":\"Red key: APPLE\\nBlue key: OCEAN\\nGreen key: FOREST\\n\\nReturn only the value of the blue key.\",\"provider\":\"hugging_face\",\"model\":\"Qwen/Qwen2.5-3B-Instruct\",\"preset\":\"general\",\"temperature\":0,\"top_p\":1,\"parent_node_id\":\"main:1:05c4018a\",\"parent_token\":\"CE\",\"assistant_prefix\":\"OCE\",\"prompt_token_ids\":[151644,8948,198,2610,525,1207,16948,11,3465,553,54364,14817,13,1446,525,264,10950,17847,13,151645,198,151644,872,198,6033,1376,25,90336,198,10331,1376,25,506,2104,1093,198,19576,1376,25,43923,784,271,5598,1172,279,897,315,279,6303,1376,13,151645,198,151644,77091,198],\"canonical_prefix_token_ids\":[151644,8948,198,2610,525,1207,16948,11,3465,553,54364,14817,13,1446,525,264,10950,17847,13,151645,198,151644,872,198,6033,1376,25,90336,198,10331,1376,25,506,2104,1093,198,19576,1376,25,43923,784,271,5598,1172,279,897,315,279,6303,1376,13,151645,198,151644,77091,198,46,2104],\"generated_prefix_token_ids\":[46,2104],\"reconstructed_prompt\":\"Red key: APPLE\\nBlue key: OCEAN\\nGreen key: FOREST\\n\\nReturn only the value of the blue key.OCE\",\"expected_prompt_length\":91,\"expected_utf8_length\":91,\"expected_assistant_prefix_length\":3,\"expected_assistant_prefix_utf8_length\":3,\"expected_token_count\":2,\"selected_token_id\":2104,\"selected_tokenizer_id\":2104,\"model_revision\":\"aa8e72537993ba99e69dfaafa59ed015b17504d1\",\"tokenizer_identity\":\"Qwen/Qwen2.5-3B-Instruct\",\"tokenizer_revision\":\"aa8e72537993ba99e69dfaafa59ed015b17504d1\",\"depth\":2,\"cumulative_probability\":0.779785,\"variation\":1,\"max_children\":4,\"demo_mode\":false,\"cached_segment_id\":null,\"cached_token_index\":null}"
+    }
+  ]
+}

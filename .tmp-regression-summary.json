@@ -1,0 +1,1359 @@
+{
+  "before-selection": {
+    "viewport": {
+      "x": 122,
+      "y": 499.23,
+      "zoom": 0.770455
+    },
+    "graphBounds": {
+      "minX": 122,
+      "minY": 451.46136474609375,
+      "maxX": 1478,
+      "maxY": 548.6590576171875,
+      "width": 1356,
+      "height": 97.19769287109375
+    },
+    "promptBounds": null,
+    "currentRealityRect": {
+      "x": 120,
+      "y": 92,
+      "width": 1164,
+      "height": 77.59375,
+      "top": 92,
+      "left": 120,
+      "right": 1284,
+      "bottom": 169.59375
+    },
+    "inspectorRect": {
+      "x": 1300,
+      "y": 16,
+      "width": 284,
+      "height": 968,
+      "top": 16,
+      "left": 1300,
+      "right": 1584,
+      "bottom": 984
+    },
+    "generationRect": {
+      "x": 16,
+      "y": 16,
+      "width": 92,
+      "height": 148,
+      "top": 16,
+      "left": 16,
+      "right": 108,
+      "bottom": 164
+    },
+    "diagnosticReason": null,
+    "diagnosticBounds": null,
+    "focusCandidateIds": null,
+    "includedFocusIds": null,
+    "targetViewport": null,
+    "promptExpansionState": null,
+    "promptNodeCount": 0,
+    "graphNodeCount": 5
+  },
+  "o-selected-before-attention": {
+    "viewport": {
+      "x": 222.684,
+      "y": 499.653,
+      "zoom": 0.827312
+    },
+    "graphBounds": {
+      "minX": 222.6837615966797,
+      "minY": -241.61923217773438,
+      "maxX": 1678.7535400390625,
+      "maxY": 990.2489013671875,
+      "width": 1456.0697784423828,
+      "height": 1231.8681335449219
+    },
+    "promptBounds": null,
+    "currentRealityRect": {
+      "x": 120,
+      "y": 92,
+      "width": 1164,
+      "height": 77.59375,
+      "top": 92,
+      "left": 120,
+      "right": 1284,
+      "bottom": 169.59375
+    },
+    "inspectorRect": {
+      "x": 1300,
+      "y": 16,
+      "width": 284,
+      "height": 968,
+      "top": 16,
+      "left": 1300,
+      "right": 1584,
+      "bottom": 984
+    },
+    "generationRect": {
+      "x": 16,
+      "y": 16,
+      "width": 92,
+      "height": 148,
+      "top": 16,
+      "left": 16,
+      "right": 108,
+      "bottom": 164
+    },
+    "diagnosticReason": null,
+    "diagnosticBounds": null,
+    "focusCandidateIds": null,
+    "includedFocusIds": null,
+    "targetViewport": null,
+    "promptExpansionState": null,
+    "promptNodeCount": 0,
+    "graphNodeCount": 10
+  },
+  "o-after-attention": {
+    "viewport": {
+      "x": 290.6,
+      "y": 500,
+      "zoom": 0.9
+    },
+    "graphBounds": {
+      "minX": 290.6000061035156,
+      "minY": 444.20001220703125,
+      "maxX": 1874.5999755859375,
+      "maxY": 569.890625,
+      "width": 1583.9999694824219,
+      "height": 125.69061279296875
+    },
+    "promptBounds": null,
+    "currentRealityRect": {
+      "x": 120,
+      "y": 92,
+      "width": 1164,
+      "height": 77.59375,
+      "top": 92,
+      "left": 120,
+      "right": 1284,
+      "bottom": 169.59375
+    },
+    "inspectorRect": {
+      "x": 1300,
+      "y": 16,
+      "width": 284,
+      "height": 968,
+      "top": 16,
+      "left": 1300,
+      "right": 1584,
+      "bottom": 984
+    },
+    "generationRect": {
+      "x": 16,
+      "y": 16,
+      "width": 92,
+      "height": 148,
+      "top": 16,
+      "left": 16,
+      "right": 108,
+      "bottom": 164
+    },
+    "diagnosticReason": "attention-analysis-complete",
+    "diagnosticBounds": null,
+    "focusCandidateIds": [],
+    "includedFocusIds": [],
+    "targetViewport": null,
+    "promptExpansionState": {
+      "canonicalPromptTokenCount": 56,
+      "constructedPromptNodeCount": 0,
+      "invariant": {
+        "promptNodeCount": 0,
+        "promptNodeIds": [],
+        "promptSummaryCount": 1
+      },
+      "showPromptTokens": false
+    },
+    "promptNodeCount": 0,
+    "graphNodeCount": 5
+  },
+  "o-after-prompt-mount": {
+    "viewport": {
+      "x": 290.6,
+      "y": 500,
+      "zoom": 0.9
+    },
+    "graphBounds": {
+      "minX": 706.4000244140625,
+      "minY": 449.6000061035156,
+      "maxX": 1874.5999755859375,
+      "maxY": 543.7906494140625,
+      "width": 1168.199951171875,
+      "height": 94.19064331054688
+    },
+    "promptBounds": {
+      "minX": -362.7999572753906,
+      "minY": -736.5999755859375,
+      "maxX": 681.199951171875,
+      "maxY": 8.600006103515625,
+      "width": 1043.9999084472656,
+      "height": 745.1999816894531
+    },
+    "currentRealityRect": {
+      "x": 120,
+      "y": 92,
+      "width": 1164,
+      "height": 77.59375,
+      "top": 92,
+      "left": 120,
+      "right": 1284,
+      "bottom": 169.59375
+    },
+    "inspectorRect": {
+      "x": 1300,
+      "y": 16,
+      "width": 284,
+      "height": 968,
+      "top": 16,
+      "left": 1300,
+      "right": 1584,
+      "bottom": 984
+    },
+    "generationRect": {
+      "x": 16,
+      "y": 16,
+      "width": 92,
+      "height": 148,
+      "top": 16,
+      "left": 16,
+      "right": 108,
+      "bottom": 164
+    },
+    "diagnosticReason": "prompt-tokens-shown",
+    "diagnosticBounds": null,
+    "focusCandidateIds": [],
+    "includedFocusIds": [],
+    "targetViewport": null,
+    "promptExpansionState": {
+      "canonicalPromptTokenCount": 56,
+      "constructedPromptNodeCount": 56,
+      "invariant": {
+        "promptNodeCount": 56,
+        "promptNodeIds": [
+          "prompt-token-0",
+          "prompt-token-1",
+          "prompt-token-2",
+          "prompt-token-3",
+          "prompt-token-4",
+          "prompt-token-5",
+          "prompt-token-6",
+          "prompt-token-7",
+          "prompt-token-8",
+          "prompt-token-9",
+          "prompt-token-10",
+          "prompt-token-11",
+          "prompt-token-12",
+          "prompt-token-13",
+          "prompt-token-14",
+          "prompt-token-15",
+          "prompt-token-16",
+          "prompt-token-17",
+          "prompt-token-18",
+          "prompt-token-19",
+          "prompt-token-20",
+          "prompt-token-21",
+          "prompt-token-22",
+          "prompt-token-23",
+          "prompt-token-24",
+          "prompt-token-25",
+          "prompt-token-26",
+          "prompt-token-27",
+          "prompt-token-28",
+          "prompt-token-29",
+          "prompt-token-30",
+          "prompt-token-31",
+          "prompt-token-32",
+          "prompt-token-33",
+          "prompt-token-34",
+          "prompt-token-35",
+          "prompt-token-36",
+          "prompt-token-37",
+          "prompt-token-38",
+          "prompt-token-39",
+          "prompt-token-40",
+          "prompt-token-41",
+          "prompt-token-42",
+          "prompt-token-43",
+          "prompt-token-44",
+          "prompt-token-45",
+          "prompt-token-46",
+          "prompt-token-47",
+          "prompt-token-48",
+          "prompt-token-49",
+          "prompt-token-50",
+          "prompt-token-51",
+          "prompt-token-52",
+          "prompt-token-53",
+          "prompt-token-54",
+          "prompt-token-55"
+        ],
+        "promptSummaryCount": 0
+      },
+      "showPromptTokens": true
+    },
+    "promptNodeCount": 56,
+    "graphNodeCount": 4
+  },
+  "o-after-focus": {
+    "viewport": {
+      "x": 486.033,
+      "y": 901.35,
+      "zoom": 0.605811
+    },
+    "graphBounds": {
+      "minX": 765.9176025390625,
+      "minY": 867.42431640625,
+      "maxX": 1552.26025390625,
+      "maxY": 930.8262329101562,
+      "width": 786.3426513671875,
+      "height": 63.40191650390625
+    },
+    "promptBounds": {
+      "minX": 46.214202880859375,
+      "minY": 68.96551513671875,
+      "maxX": 748.9548950195312,
+      "maxY": 570.5769653320312,
+      "width": 702.7406921386719,
+      "height": 501.6114501953125
+    },
+    "currentRealityRect": {
+      "x": 120,
+      "y": 92,
+      "width": 1164,
+      "height": 77.59375,
+      "top": 92,
+      "left": 120,
+      "right": 1284,
+      "bottom": 169.59375
+    },
+    "inspectorRect": {
+      "x": 1300,
+      "y": 16,
+      "width": 284,
+      "height": 968,
+      "top": 16,
+      "left": 1300,
+      "right": 1584,
+      "bottom": 984
+    },
+    "generationRect": {
+      "x": 16,
+      "y": 16,
+      "width": 92,
+      "height": 148,
+      "top": 16,
+      "left": 16,
+      "right": 108,
+      "bottom": 164
+    },
+    "diagnosticReason": "focus-attention:computed",
+    "diagnosticBounds": {
+      "height": 1423,
+      "maxX": 626,
+      "maxY": 49,
+      "minX": -362,
+      "minY": -1374,
+      "width": 988
+    },
+    "focusCandidateIds": [
+      "main:0:023900f4",
+      "prompt-token-55",
+      "prompt-token-2",
+      "prompt-token-54",
+      "prompt-token-27",
+      "prompt-token-29",
+      "prompt-token-36",
+      "prompt-token-53",
+      "prompt-token-50"
+    ],
+    "includedFocusIds": [
+      "main:0:023900f4",
+      "prompt-token-55",
+      "prompt-token-2",
+      "prompt-token-54",
+      "prompt-token-27",
+      "prompt-token-29",
+      "prompt-token-36",
+      "prompt-token-53",
+      "prompt-token-50"
+    ],
+    "targetViewport": {
+      "x": 486.0329561150556,
+      "y": 901.3497467710278,
+      "zoom": 0.605810938522306
+    },
+    "promptExpansionState": {
+      "canonicalPromptTokenCount": 56,
+      "constructedPromptNodeCount": 56,
+      "invariant": {
+        "promptNodeCount": 56,
+        "promptNodeIds": [
+          "prompt-token-0",
+          "prompt-token-1",
+          "prompt-token-2",
+          "prompt-token-3",
+          "prompt-token-4",
+          "prompt-token-5",
+          "prompt-token-6",
+          "prompt-token-7",
+          "prompt-token-8",
+          "prompt-token-9",
+          "prompt-token-10",
+          "prompt-token-11",
+          "prompt-token-12",
+          "prompt-token-13",
+          "prompt-token-14",
+          "prompt-token-15",
+          "prompt-token-16",
+          "prompt-token-17",
+          "prompt-token-18",
+          "prompt-token-19",
+          "prompt-token-20",
+          "prompt-token-21",
+          "prompt-token-22",
+          "prompt-token-23",
+          "prompt-token-24",
+          "prompt-token-25",
+          "prompt-token-26",
+          "prompt-token-27",
+          "prompt-token-28",
+          "prompt-token-29",
+          "prompt-token-30",
+          "prompt-token-31",
+          "prompt-token-32",
+          "prompt-token-33",
+          "prompt-token-34",
+          "prompt-token-35",
+          "prompt-token-36",
+          "prompt-token-37",
+          "prompt-token-38",
+          "prompt-token-39",
+          "prompt-token-40",
+          "prompt-token-41",
+          "prompt-token-42",
+          "prompt-token-43",
+          "prompt-token-44",
+          "prompt-token-45",
+          "prompt-token-46",
+          "prompt-token-47",
+          "prompt-token-48",
+          "prompt-token-49",
+          "prompt-token-50",
+          "prompt-token-51",
+          "prompt-token-52",
+          "prompt-token-53",
+          "prompt-token-54",
+          "prompt-token-55"
+        ],
+        "promptSummaryCount": 0
+      },
+      "showPromptTokens": true
+    },
+    "promptNodeCount": 56,
+    "graphNodeCount": 4
+  },
+  "ce-selected-before-attention": {
+    "viewport": {
+      "x": 283.247,
+      "y": 500,
+      "zoom": 0.898027
+    },
+    "graphBounds": {
+      "minX": 283.24658203125,
+      "minY": -304.6318359375,
+      "maxX": 1863.7733154296875,
+      "maxY": 1032.52978515625,
+      "width": 1580.5267333984375,
+      "height": 1337.16162109375
+    },
+    "promptBounds": null,
+    "currentRealityRect": {
+      "x": 120,
+      "y": 92,
+      "width": 1164,
+      "height": 77.59375,
+      "top": 92,
+      "left": 120,
+      "right": 1284,
+      "bottom": 169.59375
+    },
+    "inspectorRect": {
+      "x": 1300,
+      "y": 16,
+      "width": 284,
+      "height": 968,
+      "top": 16,
+      "left": 1300,
+      "right": 1584,
+      "bottom": 984
+    },
+    "generationRect": {
+      "x": 16,
+      "y": 16,
+      "width": 92,
+      "height": 148,
+      "top": 16,
+      "left": 16,
+      "right": 108,
+      "bottom": 164
+    },
+    "diagnosticReason": "focus-attention:computed",
+    "diagnosticBounds": {
+      "height": 1423,
+      "maxX": 626,
+      "maxY": 49,
+      "minX": -362,
+      "minY": -1374,
+      "width": 988
+    },
+    "focusCandidateIds": [
+      "main:0:023900f4",
+      "prompt-token-55",
+      "prompt-token-2",
+      "prompt-token-54",
+      "prompt-token-27",
+      "prompt-token-29",
+      "prompt-token-36",
+      "prompt-token-53",
+      "prompt-token-50"
+    ],
+    "includedFocusIds": [
+      "main:0:023900f4",
+      "prompt-token-55",
+      "prompt-token-2",
+      "prompt-token-54",
+      "prompt-token-27",
+      "prompt-token-29",
+      "prompt-token-36",
+      "prompt-token-53",
+      "prompt-token-50"
+    ],
+    "targetViewport": {
+      "x": 486.0329561150556,
+      "y": 901.3497467710278,
+      "zoom": 0.605810938522306
+    },
+    "promptExpansionState": {
+      "canonicalPromptTokenCount": 56,
+      "constructedPromptNodeCount": 56,
+      "invariant": {
+        "promptNodeCount": 56,
+        "promptNodeIds": [
+          "prompt-token-0",
+          "prompt-token-1",
+          "prompt-token-2",
+          "prompt-token-3",
+          "prompt-token-4",
+          "prompt-token-5",
+          "prompt-token-6",
+          "prompt-token-7",
+          "prompt-token-8",
+          "prompt-token-9",
+          "prompt-token-10",
+          "prompt-token-11",
+          "prompt-token-12",
+          "prompt-token-13",
+          "prompt-token-14",
+          "prompt-token-15",
+          "prompt-token-16",
+          "prompt-token-17",
+          "prompt-token-18",
+          "prompt-token-19",
+          "prompt-token-20",
+          "prompt-token-21",
+          "prompt-token-22",
+          "prompt-token-23",
+          "prompt-token-24",
+          "prompt-token-25",
+          "prompt-token-26",
+          "prompt-token-27",
+          "prompt-token-28",
+          "prompt-token-29",
+          "prompt-token-30",
+          "prompt-token-31",
+          "prompt-token-32",
+          "prompt-token-33",
+          "prompt-token-34",
+          "prompt-token-35",
+          "prompt-token-36",
+          "prompt-token-37",
+          "prompt-token-38",
+          "prompt-token-39",
+          "prompt-token-40",
+          "prompt-token-41",
+          "prompt-token-42",
+          "prompt-token-43",
+          "prompt-token-44",
+          "prompt-token-45",
+          "prompt-token-46",
+          "prompt-token-47",
+          "prompt-token-48",
+          "prompt-token-49",
+          "prompt-token-50",
+          "prompt-token-51",
+          "prompt-token-52",
+          "prompt-token-53",
+          "prompt-token-54",
+          "prompt-token-55"
+        ],
+        "promptSummaryCount": 0
+      },
+      "showPromptTokens": true
+    },
+    "promptNodeCount": 0,
+    "graphNodeCount": 10
+  },
+  "ce-after-attention": {
+    "viewport": {
+      "x": -49.6,
+      "y": 500,
+      "zoom": 0.9
+    },
+    "graphBounds": {
+      "minX": -49.599998474121094,
+      "minY": 444.20001220703125,
+      "maxX": 1534.4000244140625,
+      "maxY": 569.890625,
+      "width": 1584.0000228881836,
+      "height": 125.69061279296875
+    },
+    "promptBounds": null,
+    "currentRealityRect": {
+      "x": 120,
+      "y": 92,
+      "width": 1164,
+      "height": 77.59375,
+      "top": 92,
+      "left": 120,
+      "right": 1284,
+      "bottom": 169.59375
+    },
+    "inspectorRect": {
+      "x": 1300,
+      "y": 16,
+      "width": 284,
+      "height": 968,
+      "top": 16,
+      "left": 1300,
+      "right": 1584,
+      "bottom": 984
+    },
+    "generationRect": {
+      "x": 16,
+      "y": 16,
+      "width": 92,
+      "height": 148,
+      "top": 16,
+      "left": 16,
+      "right": 108,
+      "bottom": 164
+    },
+    "diagnosticReason": "attention-analysis-complete",
+    "diagnosticBounds": null,
+    "focusCandidateIds": [],
+    "includedFocusIds": [],
+    "targetViewport": null,
+    "promptExpansionState": {
+      "canonicalPromptTokenCount": 56,
+      "constructedPromptNodeCount": 0,
+      "invariant": {
+        "promptNodeCount": 0,
+        "promptNodeIds": [],
+        "promptSummaryCount": 1
+      },
+      "showPromptTokens": false
+    },
+    "promptNodeCount": 0,
+    "graphNodeCount": 5
+  },
+  "ce-after-prompt-mount": {
+    "viewport": {
+      "x": -49.6,
+      "y": 500,
+      "zoom": 0.9
+    },
+    "graphBounds": {
+      "minX": 366.1999816894531,
+      "minY": 449.6000061035156,
+      "maxX": 1534.4000244140625,
+      "maxY": 543.7906494140625,
+      "width": 1168.2000427246094,
+      "height": 94.19064331054688
+    },
+    "promptBounds": {
+      "minX": -702.9999389648438,
+      "minY": 19.4000244140625,
+      "maxX": 340.9999694824219,
+      "maxY": 764.5999755859375,
+      "width": 1043.9999084472656,
+      "height": 745.199951171875
+    },
+    "currentRealityRect": {
+      "x": 120,
+      "y": 92,
+      "width": 1164,
+      "height": 77.59375,
+      "top": 92,
+      "left": 120,
+      "right": 1284,
+      "bottom": 169.59375
+    },
+    "inspectorRect": {
+      "x": 1300,
+      "y": 16,
+      "width": 284,
+      "height": 968,
+      "top": 16,
+      "left": 1300,
+      "right": 1584,
+      "bottom": 984
+    },
+    "generationRect": {
+      "x": 16,
+      "y": 16,
+      "width": 92,
+      "height": 148,
+      "top": 16,
+      "left": 16,
+      "right": 108,
+      "bottom": 164
+    },
+    "diagnosticReason": "prompt-tokens-shown",
+    "diagnosticBounds": null,
+    "focusCandidateIds": [],
+    "includedFocusIds": [],
+    "targetViewport": null,
+    "promptExpansionState": {
+      "canonicalPromptTokenCount": 56,
+      "constructedPromptNodeCount": 56,
+      "invariant": {
+        "promptNodeCount": 56,
+        "promptNodeIds": [
+          "prompt-token-0",
+          "prompt-token-1",
+          "prompt-token-2",
+          "prompt-token-3",
+          "prompt-token-4",
+          "prompt-token-5",
+          "prompt-token-6",
+          "prompt-token-7",
+          "prompt-token-8",
+          "prompt-token-9",
+          "prompt-token-10",
+          "prompt-token-11",
+          "prompt-token-12",
+          "prompt-token-13",
+          "prompt-token-14",
+          "prompt-token-15",
+          "prompt-token-16",
+          "prompt-token-17",
+          "prompt-token-18",
+          "prompt-token-19",
+          "prompt-token-20",
+          "prompt-token-21",
+          "prompt-token-22",
+          "prompt-token-23",
+          "prompt-token-24",
+          "prompt-token-25",
+          "prompt-token-26",
+          "prompt-token-27",
+          "prompt-token-28",
+          "prompt-token-29",
+          "prompt-token-30",
+          "prompt-token-31",
+          "prompt-token-32",
+          "prompt-token-33",
+          "prompt-token-34",
+          "prompt-token-35",
+          "prompt-token-36",
+          "prompt-token-37",
+          "prompt-token-38",
+          "prompt-token-39",
+          "prompt-token-40",
+          "prompt-token-41",
+          "prompt-token-42",
+          "prompt-token-43",
+          "prompt-token-44",
+          "prompt-token-45",
+          "prompt-token-46",
+          "prompt-token-47",
+          "prompt-token-48",
+          "prompt-token-49",
+          "prompt-token-50",
+          "prompt-token-51",
+          "prompt-token-52",
+          "prompt-token-53",
+          "prompt-token-54",
+          "prompt-token-55"
+        ],
+        "promptSummaryCount": 0
+      },
+      "showPromptTokens": true
+    },
+    "promptNodeCount": 56,
+    "graphNodeCount": 4
+  },
+  "ce-after-focus": {
+    "viewport": {
+      "x": 261.24,
+      "y": 594.744,
+      "zoom": 0.789532
+    },
+    "graphBounds": {
+      "minX": 626.0044555664062,
+      "minY": 550.5300903320312,
+      "maxX": 1650.8175048828125,
+      "maxY": 633.1596069335938,
+      "width": 1024.8130493164062,
+      "height": 82.6295166015625
+    },
+    "promptBounds": {
+      "minX": -311.9600830078125,
+      "minY": 173.13357543945312,
+      "maxX": 603.8975830078125,
+      "maxY": 826.866455078125,
+      "width": 915.857666015625,
+      "height": 653.7328796386719
+    },
+    "currentRealityRect": {
+      "x": 120,
+      "y": 92,
+      "width": 1164,
+      "height": 77.59375,
+      "top": 92,
+      "left": 120,
+      "right": 1284,
+      "bottom": 169.59375
+    },
+    "inspectorRect": {
+      "x": 1300,
+      "y": 16,
+      "width": 284,
+      "height": 968,
+      "top": 16,
+      "left": 1300,
+      "right": 1584,
+      "bottom": 984
+    },
+    "generationRect": {
+      "x": 16,
+      "y": 16,
+      "width": 92,
+      "height": 148,
+      "top": 16,
+      "left": 16,
+      "right": 108,
+      "bottom": 164
+    },
+    "diagnosticReason": "focus-attention:computed",
+    "diagnosticBounds": {
+      "height": 828,
+      "maxX": 1004,
+      "maxY": 294,
+      "minX": -232,
+      "minY": -534,
+      "width": 1236
+    },
+    "focusCandidateIds": [
+      "main:1:05c4018a",
+      "main:0:023900f4",
+      "prompt-token-2",
+      "prompt-token-54",
+      "prompt-token-55",
+      "prompt-token-27",
+      "prompt-token-0",
+      "prompt-token-36",
+      "prompt-token-11"
+    ],
+    "includedFocusIds": [
+      "main:1:05c4018a",
+      "main:0:023900f4",
+      "prompt-token-2",
+      "prompt-token-54",
+      "prompt-token-55",
+      "prompt-token-27",
+      "prompt-token-0",
+      "prompt-token-36",
+      "prompt-token-11"
+    ],
+    "targetViewport": {
+      "x": 261.2404865528401,
+      "y": 594.743890190827,
+      "zoom": 0.789532418256891
+    },
+    "promptExpansionState": {
+      "canonicalPromptTokenCount": 56,
+      "constructedPromptNodeCount": 56,
+      "invariant": {
+        "promptNodeCount": 56,
+        "promptNodeIds": [
+          "prompt-token-0",
+          "prompt-token-1",
+          "prompt-token-2",
+          "prompt-token-3",
+          "prompt-token-4",
+          "prompt-token-5",
+          "prompt-token-6",
+          "prompt-token-7",
+          "prompt-token-8",
+          "prompt-token-9",
+          "prompt-token-10",
+          "prompt-token-11",
+          "prompt-token-12",
+          "prompt-token-13",
+          "prompt-token-14",
+          "prompt-token-15",
+          "prompt-token-16",
+          "prompt-token-17",
+          "prompt-token-18",
+          "prompt-token-19",
+          "prompt-token-20",
+          "prompt-token-21",
+          "prompt-token-22",
+          "prompt-token-23",
+          "prompt-token-24",
+          "prompt-token-25",
+          "prompt-token-26",
+          "prompt-token-27",
+          "prompt-token-28",
+          "prompt-token-29",
+          "prompt-token-30",
+          "prompt-token-31",
+          "prompt-token-32",
+          "prompt-token-33",
+          "prompt-token-34",
+          "prompt-token-35",
+          "prompt-token-36",
+          "prompt-token-37",
+          "prompt-token-38",
+          "prompt-token-39",
+          "prompt-token-40",
+          "prompt-token-41",
+          "prompt-token-42",
+          "prompt-token-43",
+          "prompt-token-44",
+          "prompt-token-45",
+          "prompt-token-46",
+          "prompt-token-47",
+          "prompt-token-48",
+          "prompt-token-49",
+          "prompt-token-50",
+          "prompt-token-51",
+          "prompt-token-52",
+          "prompt-token-53",
+          "prompt-token-54",
+          "prompt-token-55"
+        ],
+        "promptSummaryCount": 0
+      },
+      "showPromptTokens": true
+    },
+    "promptNodeCount": 56,
+    "graphNodeCount": 4
+  },
+  "continuation-modal-open": {
+    "viewport": {
+      "x": 261.24,
+      "y": 594.744,
+      "zoom": 0.789532
+    },
+    "graphBounds": {
+      "minX": 626.0044555664062,
+      "minY": 550.5300903320312,
+      "maxX": 1650.8175048828125,
+      "maxY": 633.1596069335938,
+      "width": 1024.8130493164062,
+      "height": 82.6295166015625
+    },
+    "promptBounds": {
+      "minX": -311.9600830078125,
+      "minY": 173.13357543945312,
+      "maxX": 603.8975830078125,
+      "maxY": 826.866455078125,
+      "width": 915.857666015625,
+      "height": 653.7328796386719
+    },
+    "currentRealityRect": {
+      "x": 120,
+      "y": 92,
+      "width": 1164,
+      "height": 77.59375,
+      "top": 92,
+      "left": 120,
+      "right": 1284,
+      "bottom": 169.59375
+    },
+    "inspectorRect": {
+      "x": 1300,
+      "y": 16,
+      "width": 284,
+      "height": 968,
+      "top": 16,
+      "left": 1300,
+      "right": 1584,
+      "bottom": 984
+    },
+    "generationRect": {
+      "x": 16,
+      "y": 16,
+      "width": 92,
+      "height": 148,
+      "top": 16,
+      "left": 16,
+      "right": 108,
+      "bottom": 164
+    },
+    "diagnosticReason": "focus-attention:computed",
+    "diagnosticBounds": {
+      "height": 828,
+      "maxX": 1004,
+      "maxY": 294,
+      "minX": -232,
+      "minY": -534,
+      "width": 1236
+    },
+    "focusCandidateIds": [
+      "main:1:05c4018a",
+      "main:0:023900f4",
+      "prompt-token-2",
+      "prompt-token-54",
+      "prompt-token-55",
+      "prompt-token-27",
+      "prompt-token-0",
+      "prompt-token-36",
+      "prompt-token-11"
+    ],
+    "includedFocusIds": [
+      "main:1:05c4018a",
+      "main:0:023900f4",
+      "prompt-token-2",
+      "prompt-token-54",
+      "prompt-token-55",
+      "prompt-token-27",
+      "prompt-token-0",
+      "prompt-token-36",
+      "prompt-token-11"
+    ],
+    "targetViewport": {
+      "x": 261.2404865528401,
+      "y": 594.743890190827,
+      "zoom": 0.789532418256891
+    },
+    "promptExpansionState": {
+      "canonicalPromptTokenCount": 56,
+      "constructedPromptNodeCount": 56,
+      "invariant": {
+        "promptNodeCount": 56,
+        "promptNodeIds": [
+          "prompt-token-0",
+          "prompt-token-1",
+          "prompt-token-2",
+          "prompt-token-3",
+          "prompt-token-4",
+          "prompt-token-5",
+          "prompt-token-6",
+          "prompt-token-7",
+          "prompt-token-8",
+          "prompt-token-9",
+          "prompt-token-10",
+          "prompt-token-11",
+          "prompt-token-12",
+          "prompt-token-13",
+          "prompt-token-14",
+          "prompt-token-15",
+          "prompt-token-16",
+          "prompt-token-17",
+          "prompt-token-18",
+          "prompt-token-19",
+          "prompt-token-20",
+          "prompt-token-21",
+          "prompt-token-22",
+          "prompt-token-23",
+          "prompt-token-24",
+          "prompt-token-25",
+          "prompt-token-26",
+          "prompt-token-27",
+          "prompt-token-28",
+          "prompt-token-29",
+          "prompt-token-30",
+          "prompt-token-31",
+          "prompt-token-32",
+          "prompt-token-33",
+          "prompt-token-34",
+          "prompt-token-35",
+          "prompt-token-36",
+          "prompt-token-37",
+          "prompt-token-38",
+          "prompt-token-39",
+          "prompt-token-40",
+          "prompt-token-41",
+          "prompt-token-42",
+          "prompt-token-43",
+          "prompt-token-44",
+          "prompt-token-45",
+          "prompt-token-46",
+          "prompt-token-47",
+          "prompt-token-48",
+          "prompt-token-49",
+          "prompt-token-50",
+          "prompt-token-51",
+          "prompt-token-52",
+          "prompt-token-53",
+          "prompt-token-54",
+          "prompt-token-55"
+        ],
+        "promptSummaryCount": 0
+      },
+      "showPromptTokens": true
+    },
+    "promptNodeCount": 56,
+    "graphNodeCount": 4
+  },
+  "continuation-after-click": {
+    "viewport": {
+      "x": 261.24,
+      "y": 594.744,
+      "zoom": 0.789532
+    },
+    "graphBounds": {
+      "minX": 261.240478515625,
+      "minY": 545.7929077148438,
+      "maxX": 1650.8175048828125,
+      "maxY": 656.0560302734375,
+      "width": 1389.5770263671875,
+      "height": 110.26312255859375
+    },
+    "promptBounds": null,
+    "currentRealityRect": {
+      "x": 120,
+      "y": 92,
+      "width": 1164,
+      "height": 77.59375,
+      "top": 92,
+      "left": 120,
+      "right": 1284,
+      "bottom": 169.59375
+    },
+    "inspectorRect": {
+      "x": 1300,
+      "y": 16,
+      "width": 284,
+      "height": 968,
+      "top": 16,
+      "left": 1300,
+      "right": 1584,
+      "bottom": 984
+    },
+    "generationRect": {
+      "x": 16,
+      "y": 16,
+      "width": 92,
+      "height": 148,
+      "top": 16,
+      "left": 16,
+      "right": 108,
+      "bottom": 164
+    },
+    "diagnosticReason": "attention-analysis-complete",
+    "diagnosticBounds": null,
+    "focusCandidateIds": [],
+    "includedFocusIds": [],
+    "targetViewport": null,
+    "promptExpansionState": {
+      "canonicalPromptTokenCount": 56,
+      "constructedPromptNodeCount": 0,
+      "invariant": {
+        "promptNodeCount": 0,
+        "promptNodeIds": [],
+        "promptSummaryCount": 1
+      },
+      "showPromptTokens": false
+    },
+    "promptNodeCount": 0,
+    "graphNodeCount": 5
+  },
+  "continuation": {
+    "modalText": "Continuation checkContinue branchCloseOriginal promptRed key: APPLE\nBlue key: OCEAN\nGreen key: FOREST\n\nReturn only the value of the blue key.Reconstructed continuation prefixOCE2 tokens3 chars3 bytesExpected assistant prefixOCERaw-token reconstruction matches the stored graph context.Qwen/Qwen2.5-3B-Instructtemp 0top_p 1liveGeneration historyQwen/Qwen2.5-3B-Instruct · 2026-08-10T04:03:16.544506ZCancelContinue",
+    "buttonDisabled": false,
+    "requestCountBefore": 0,
+    "requestCountAfter": 0,
+    "requestDelta": 0,
+    "afterClickSelection": {
+      "modalOpen": false,
+      "selectedInspectorText": "InspectorANBasicChosen tokenANProbability100.0%ModeRawContinuationMode: ExactRank1Entropy0.0000Latency197 msTop-K coverage100.0%ProviderHugging Face LocalModelQwen/Qwen2.5-3B-InstructContextBefore tokenOCEThrough tokenOCEANInterpretationAfter \"AN\", \"AN\" had the highest returned probability among the returned candidates, ahead of \"an\" by +100.0%.Attention LensPredictionLayer 35Clear attentionShow prompt tokensFocus attentionWhat did the model attend to while predicting \"AN\"?Attention shows how this layer and head distributed internal focus across earlier tokens. It is a model signal, not proof of reasoning or causation.Temporary eager attention may run more slowly on local Qwen models.Average headsAttention used while predicting \"AN\"59 analyzed tokensPrompt attention 78.7%Earlier output 21.3%Template/control 66.8%Top N coverage 89.0%8 ranked sources · 8 visible1. ↵\n34.9%Prompt summary · pos 22. assistant25.5%Prompt summary · pos 543. CE15.7%Earlier output · pos 574. O5.5%Earlier output · pos 565. ↵\n3.8%Prompt summary · pos 556. ␠APPLE1.4%Prompt summary · pos 277. <|im_start|>1.2%Prompt summary · pos 08. AN0.9%Prompt summary · pos 34AdvancedModePrediction attentionRepresentation attentionTop sourcesTop 5Top 8Top 12Top 20Layer01234567891011121314151617181920212223242526272829303132333435Head modeAverage headsMax headsSingle headImplementationsdpaTop alternativesRawOther tokens 0.0%AN100.0%Chosenan0.0%+100.0%!0.0%+100.0%\"0.0%+100.0%#0.0%+100.0%$0.0%+100.0%AdvancedRaw tokenANDecoded tokenANToken id1093Tokenizer id1093Raw probability1.0000Log probability0.0000Cumulative probability0.7798Cumulative logprob-0.2488Branch depth3Parent idmain:1:05c4018aGeneration step2Segment idsegment:root:9b960a5eUTF-8 length2Leading whitespace0Trailing whitespace0Byte representation65 78Metadatabranch_id: main · parent_node_id: main:1:05c4018a · provider: hugging_face · device: cuda:0 · precision: float16 · resolved_revision: aa8e72537993ba99e69dfaafa59ed015b17504d1 · requested_revision: null · tokenizer_identity: Qwen/Qwen2.5-3B-Instruct · tokenizer_revision: aa8e72537993ba99e69dfaafa59ed015b17504d1 · local_exact: true · continuation_mode: exact · continuation_mode_label: Exact · continuation_mode_is_exact: true · continuation_mode_tooltip: Probabilities come directly from one uninterrupted provider generation. · segment_id: segment:root:9b960a5eNotesDirect local Transformers inference with exact token IDs, logprobs, entropy, and alternatives.",
+      "diagnostic": {
+        "bounds": null,
+        "currentViewport": {
+          "x": 261.2404865528401,
+          "y": 594.743890190827,
+          "zoom": 0.789532418256891
+        },
+        "displayNodeCount": 5,
+        "domNodeCount": 5,
+        "domPromptNodeCount": 0,
+        "focusCandidateIds": [],
+        "includedFocusIds": [],
+        "liveNodeCount": 5,
+        "nodes": [
+          {
+            "canonicalPosition": 2,
+            "displayNodeHidden": false,
+            "domRect": {
+              "bottom": 633.1596069335938,
+              "height": 82.6295166015625,
+              "left": 1222.8909912109375,
+              "right": 1352.374267578125,
+              "top": 550.5300903320312,
+              "width": 129.4832763671875,
+              "x": 1222.8909912109375,
+              "y": 550.5300903320312
+            },
+            "existsInDom": true,
+            "existsInFlowGetNodes": true,
+            "id": "main:2:05e50197",
+            "includedInFocus": false,
+            "insideVisibleViewport": true,
+            "internalPositionAbsolute": {
+              "x": 1218,
+              "y": -56
+            },
+            "measured": {
+              "height": 105,
+              "width": 164
+            },
+            "position": {
+              "x": 1218,
+              "y": -56
+            },
+            "sourceCategory": "generated_output",
+            "type": "token"
+          },
+          {
+            "canonicalPosition": null,
+            "displayNodeHidden": false,
+            "domRect": {
+              "bottom": 656.0560302734375,
+              "height": 110.26312255859375,
+              "left": 261.240478515625,
+              "right": 355.984375,
+              "top": 545.7929077148438,
+              "width": 94.743896484375,
+              "x": 261.240478515625,
+              "y": 545.7929077148438
+            },
+            "existsInDom": true,
+            "existsInFlowGetNodes": true,
+            "id": "root",
+            "includedInFocus": false,
+            "insideVisibleViewport": true,
+            "internalPositionAbsolute": {
+              "x": 0,
+              "y": -62
+            },
+            "measured": {
+              "height": 140,
+              "width": 120
+            },
+            "position": {
+              "x": 0,
+              "y": -62
+            },
+            "sourceCategory": "generated_output",
+            "type": "prompt"
+          },
+          {
+            "canonicalPosition": 1,
+            "displayNodeHidden": false,
+            "domRect": {
+              "bottom": 633.1596069335938,
+              "height": 82.6295166015625,
+              "left": 924.4476928710938,
+              "right": 1053.9310302734375,
+              "top": 550.5300903320312,
+              "width": 129.48333740234375,
+              "x": 924.4476928710938,
+              "y": 550.5300903320312
+            },
+            "existsInDom": true,
+            "existsInFlowGetNodes": true,
+            "id": "main:1:05c4018a",
+            "includedInFocus": false,
+            "insideVisibleViewport": true,
+            "internalPositionAbsolute": {
+              "x": 840,
+              "y": -56
+            },
+            "measured": {
+              "height": 105,
+              "width": 164
+            },
+            "position": {
+              "x": 840,
+              "y": -56
+            },
+            "sourceCategory": "generated_output",
+            "type": "token"
+          },
+          {
+            "canonicalPosition": 0,
+            "displayNodeHidden": false,
+            "domRect": {
+              "bottom": 633.1596069335938,
+              "height": 82.6295166015625,
+              "left": 626.0044555664062,
+              "right": 755.48779296875,
+              "top": 550.5300903320312,
+              "width": 129.48333740234375,
+              "x": 626.0044555664062,
+              "y": 550.5300903320312
+            },
+            "existsInDom": true,
+            "existsInFlowGetNodes": true,
+            "id": "main:0:023900f4",
+            "includedInFocus": false,
+            "insideVisibleViewport": true,
+            "internalPositionAbsolute": {
+              "x": 462,
+              "y": -56
+            },
+            "measured": {
+              "height": 105,
+              "width": 164
+            },
+            "position": {
+              "x": 462,
+              "y": -56
+            },
+            "sourceCategory": "generated_output",
+            "type": "token"
+          }
+        ],
+        "promptExpansionState": {
+          "canonicalPromptTokenCount": 56,
+          "constructedPromptNodeCount": 0,
+          "invariant": {
+            "promptNodeCount": 0,
+            "promptNodeIds": [],
+            "promptSummaryCount": 1
+          },
+          "showPromptTokens": false
+        },
+        "reactFlowContainerRect": {
+          "bottom": 1000,
+          "height": 1000,
+          "left": 0,
+          "right": 1600,
+          "top": 0,
+          "width": 1600,
+          "x": 0,
+          "y": 0
+        },
+        "reason": "attention-analysis-complete",
+        "targetViewport": null
+      }
+    }
+  }
+}
