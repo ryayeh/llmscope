@@ -120,6 +120,9 @@ class HuggingFaceAttentionRequest(BaseModel):
     aggregation_mode: HuggingFaceAttentionAggregationMode = Field(
         default=HuggingFaceAttentionAggregationMode.AVERAGE_HEADS
     )
+    comparison_layers: list[int] = Field(default_factory=list, max_length=32)
+    journey_layers: list[int] = Field(default_factory=list, max_length=256)
+    journey_max_rows: int = Field(default=5, ge=1, le=8)
     max_connections: int = Field(default=8, ge=1, le=512)
     max_context_tokens: int = Field(default=256, ge=1, le=512)
     allow_truncated_recompute: bool = False
@@ -160,6 +163,42 @@ class HuggingFaceAttentionSource(BaseModel):
     rank: int = Field(..., ge=1)
 
 
+class HuggingFaceAttentionCategoryBreakdown(BaseModel):
+    input_context: float = Field(..., ge=0)
+    earlier_output: float = Field(..., ge=0)
+    system_message: float = Field(..., ge=0)
+    user_prompt: float = Field(..., ge=0)
+    assistant_prefix: float = Field(..., ge=0)
+    template_control: float = Field(..., ge=0)
+    exclusive_total: float = Field(..., ge=0)
+
+
+class HuggingFaceAttentionLayerSummary(BaseModel):
+    layer_index: int = Field(..., ge=0)
+    depth_ratio: float = Field(..., ge=0, le=1)
+    top_meaningful_source: HuggingFaceAttentionSource | None = None
+    category_breakdown: HuggingFaceAttentionCategoryBreakdown
+    attention_mass_sum: float = Field(..., ge=0)
+    top_n_coverage: float = Field(..., ge=0)
+
+
+class HuggingFaceAttentionJourneyRow(BaseModel):
+    row_id: str
+    row_kind: str
+    label: str
+    included_reason: str
+    source: HuggingFaceAttentionSource | None = None
+    weights: list[float] = Field(default_factory=list)
+    max_weight: float = Field(..., ge=0)
+
+
+class HuggingFaceAttentionLayerJourney(BaseModel):
+    layers: list[int] = Field(default_factory=list)
+    sampled: bool = False
+    scale_max: float = Field(..., ge=0)
+    rows: list[HuggingFaceAttentionJourneyRow] = Field(default_factory=list)
+
+
 class HuggingFaceAttentionResponse(BaseModel):
     provider: ModelProvider = Field(default=ModelProvider.HUGGING_FACE)
     model_id: str
@@ -171,6 +210,7 @@ class HuggingFaceAttentionResponse(BaseModel):
     query_token: HuggingFaceAttentionTokenInfo
     analyzed_tokens: list[HuggingFaceAttentionTokenInfo] = Field(default_factory=list)
     sources: list[HuggingFaceAttentionSource] = Field(default_factory=list)
+    all_sources: list[HuggingFaceAttentionSource] = Field(default_factory=list)
     selected_layer: int = Field(..., ge=0)
     selected_head: int | None = Field(default=None, ge=0)
     aggregation_mode: HuggingFaceAttentionAggregationMode
@@ -195,3 +235,6 @@ class HuggingFaceAttentionResponse(BaseModel):
     context_truncated: bool = False
     original_full_context_length: int = Field(..., ge=1)
     analyzed_context_length: int = Field(..., ge=1)
+    category_breakdown: HuggingFaceAttentionCategoryBreakdown
+    comparison_layers: list[HuggingFaceAttentionLayerSummary] = Field(default_factory=list)
+    layer_journey: HuggingFaceAttentionLayerJourney | None = None

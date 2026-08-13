@@ -34,6 +34,9 @@ interface BuildAttentionRequestParams {
   allowTruncatedRecompute: boolean;
   analysisMode: HuggingFaceAttentionAnalysisMode;
   generatedTokenIds: number[];
+  comparisonLayers?: number[];
+  journeyLayers?: number[];
+  journeyMaxRows?: number;
   maxConnections: number;
   maxContextTokens: number;
   modelId: string;
@@ -373,7 +376,6 @@ export function buildDeterministicFocusViewport(params: {
     if (
       !node ||
       node.hidden ||
-      !node.inDom ||
       !Number.isFinite(node.x) ||
       !Number.isFinite(node.y) ||
       !Number.isFinite(node.width) ||
@@ -510,6 +512,9 @@ export function buildAttentionRequestPayload(
     selected_head: params.selectedHead,
     analysis_mode: params.analysisMode,
     aggregation_mode: params.aggregationMode,
+    comparison_layers: [...(params.comparisonLayers ?? [])],
+    journey_layers: [...(params.journeyLayers ?? [])],
+    journey_max_rows: params.journeyMaxRows ?? 5,
     max_connections: params.maxConnections,
     max_context_tokens: params.maxContextTokens,
     allow_truncated_recompute: params.allowTruncatedRecompute,

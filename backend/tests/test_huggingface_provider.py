@@ -562,6 +562,111 @@ class HuggingFaceLocalProviderTest(unittest.TestCase):
             [round(source.attention_weight, 3) for source in response.sources],
             [0.45, 0.25, 0.15],
         )
+        self.assertEqual(
+            [source.full_position for source in response.all_sources],
+            [3, 2, 0, 1],
+        )
+        self.assertAlmostEqual(response.category_breakdown.input_context, 0.3, places=4)
+        self.assertAlmostEqual(response.category_breakdown.earlier_output, 0.7, places=4)
+        self.assertAlmostEqual(response.category_breakdown.user_prompt, 0.15, places=4)
+        self.assertAlmostEqual(response.category_breakdown.template_control, 0.15, places=4)
+        self.assertAlmostEqual(response.category_breakdown.exclusive_total, 1.0, places=4)
+
+    def test_analyze_attention_returns_requested_comparison_layers_and_journey_from_one_forward(self) -> None:
+        layer0 = make_attention_tensor(
+            [
+                [0.40, 0.20, 0.20, 0.20, 0.00],
+                [0.30, 0.30, 0.20, 0.20, 0.00],
+            ],
+            query_index=3,
+        )[0]
+        layer1 = make_attention_tensor(
+            [
+                [0.10, 0.20, 0.30, 0.40, 0.00],
+                [0.20, 0.10, 0.20, 0.50, 0.00],
+            ],
+            query_index=3,
+        )[0]
+        layer2 = make_attention_tensor(
+            [
+                [0.05, 0.10, 0.35, 0.50, 0.00],
+                [0.10, 0.10, 0.25, 0.55, 0.00],
+            ],
+            query_index=3,
+        )[0]
+        fake_model = FakeAttentionModel((layer0, layer1, layer2))
+        self.provider._runtime = make_runtime(fake_model)
+
+        with patch.object(self.provider, "_ensure_cuda_available", return_value=None):
+            response = self.provider.analyze_attention(
+                HuggingFaceAttentionRequest(
+                    model_id="Qwen/Qwen2.5-3B-Instruct",
+                    prompt_token_ids=[11, 12],
+                    prompt_tokens=make_prompt_tokens(11, 12),
+                    generated_token_ids=[1, 2, 3],
+                    selected_generated_token_index=2,
+                    selected_layer=1,
+                    comparison_layers=[0, 2, 2],
+                    journey_layers=[0, 1, 2],
+                    journey_max_rows=5,
+                    analysis_mode=HuggingFaceAttentionAnalysisMode.PREDICTION,
+                    aggregation_mode=HuggingFaceAttentionAggregationMode.AVERAGE_HEADS,
+                    max_connections=3,
+                    max_context_tokens=256,
+                )
+            )
+
+        self.assertEqual(fake_model.call_count, 1)
+        self.assertEqual(
+            [summary.layer_index for summary in response.comparison_layers],
+            [0, 2],
+        )
+        self.assertIsNotNone(response.layer_journey)
+        self.assertEqual(response.layer_journey.layers, [0, 1, 2])
+        self.assertGreater(len(response.layer_journey.rows), 0)
+        self.assertGreater(response.layer_journey.scale_max, 0)
+
+    def test_find_top_meaningful_source_prefers_lexical_non_template_tokens(self) -> None:
+        source_model = huggingface_provider_module.HuggingFaceAttentionSource
+        sources = [
+            source_model(
+                token_id=15,
+                raw_token=",",
+                display_token=",",
+                decoded_contribution=",",
+                token_bytes=[44],
+                full_position=1,
+                analyzed_position=1,
+                sequence_scope=huggingface_provider_module.HuggingFaceAttentionSequenceScope.PROMPT,
+                source_category=CanonicalTokenSourceCategory.USER_PROMPT,
+                source_label="User prompt",
+                special_token=False,
+                generated_token_index=None,
+                attention_weight=0.31,
+                rank=1,
+            ),
+            source_model(
+                token_id=16,
+                raw_token=" pace",
+                display_token="pace",
+                decoded_contribution=" pace",
+                token_bytes=list(" pace".encode("utf-8")),
+                full_position=2,
+                analyzed_position=2,
+                sequence_scope=huggingface_provider_module.HuggingFaceAttentionSequenceScope.PROMPT,
+                source_category=CanonicalTokenSourceCategory.USER_PROMPT,
+                source_label="User prompt",
+                special_token=False,
+                generated_token_index=None,
+                attention_weight=0.28,
+                rank=2,
+            ),
+        ]
+
+        winner = self.provider._find_top_meaningful_source(sources)
+
+        self.assertIsNotNone(winner)
+        self.assertEqual(winner.token_id, 16)
 
     def test_analyze_attention_single_head_and_top_n_filtering(self) -> None:
         attentions = make_attention_tensor(

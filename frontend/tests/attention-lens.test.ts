@@ -283,6 +283,25 @@ function makeAttentionResponse(
         rank: 2,
       }),
     ],
+    all_sources: [
+      makeAttentionSource(),
+      makeAttentionSource({
+        token_id: 11,
+        raw_token: "<|user|>",
+        display_token: "<|user|>",
+        decoded_contribution: "<|user|>",
+        token_bytes: [60, 124, 117, 115, 101, 114, 124, 62],
+        full_position: 0,
+        analyzed_position: 0,
+        sequence_scope: "prompt",
+        source_category: "template",
+        source_label: "Template / control",
+        special_token: true,
+        generated_token_index: null,
+        attention_weight: 0.12,
+        rank: 2,
+      }),
+    ],
     selected_layer: 23,
     selected_head: aggregationMode === "single_head" ? 5 : null,
     aggregation_mode: aggregationMode,
@@ -307,6 +326,17 @@ function makeAttentionResponse(
     context_truncated: false,
     original_full_context_length: 5,
     analyzed_context_length: 5,
+    category_breakdown: {
+      input_context: 0.12,
+      earlier_output: analysisMode === "representation" ? 0.67 : 0.53,
+      system_message: 0,
+      user_prompt: 0,
+      assistant_prefix: 0,
+      template_control: 0.12,
+      exclusive_total: 1,
+    },
+    comparison_layers: [],
+    layer_journey: null,
   };
 }
 
@@ -646,10 +676,10 @@ test("buildDeterministicFocusViewport keeps only valid live nodes and computes a
         id: "stale",
         hidden: false,
         inDom: false,
-        width: 120,
-        height: 72,
-        x: 9999,
-        y: 9999,
+        width: null,
+        height: null,
+        x: null,
+        y: null,
       },
     ],
     padding: 0.18,
@@ -662,6 +692,41 @@ test("buildDeterministicFocusViewport keeps only valid live nodes and computes a
   assert.ok(result.viewport);
   assert.ok(result.viewport!.zoom >= 0.65);
   assert.ok(result.viewport!.zoom <= 1.15);
+});
+
+test("buildDeterministicFocusViewport keeps offscreen measured sources in the focus set", () => {
+  const result = buildDeterministicFocusViewport({
+    containerHeight: 900,
+    containerWidth: 1200,
+    maxZoom: 1.15,
+    minZoom: 0.65,
+    nodes: [
+      {
+        id: "selected",
+        hidden: false,
+        inDom: true,
+        width: 120,
+        height: 72,
+        x: 400,
+        y: 200,
+      },
+      {
+        id: "prompt-token-0",
+        hidden: false,
+        inDom: false,
+        width: 120,
+        height: 72,
+        x: 180,
+        y: 180,
+      },
+    ],
+    padding: 0.18,
+    selectedNodeId: "selected",
+    sourceNodeIds: ["prompt-token-0"],
+  });
+
+  assert.deepEqual(result.includedIds, ["selected", "prompt-token-0"]);
+  assert.ok(result.viewport);
 });
 
 test("buildDeterministicFocusViewport respects occupied viewport insets", () => {
@@ -747,8 +812,8 @@ test("buildDeterministicFocusViewport preserves the current viewport when the ta
         id: "selected",
         hidden: false,
         inDom: false,
-        width: 120,
-        height: 72,
+        width: null,
+        height: null,
         x: 400,
         y: 200,
       },

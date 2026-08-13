@@ -13,7 +13,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, Callable
 
 from app.core.errors import LLMScopeError
 from app.models.provider import ModelProvider
@@ -32,6 +32,10 @@ from app.schemas.generation import (
 from app.schemas.huggingface_local import (
     HuggingFaceAttentionAggregationMode,
     HuggingFaceAttentionAnalysisMode,
+    HuggingFaceAttentionCategoryBreakdown,
+    HuggingFaceAttentionJourneyRow,
+    HuggingFaceAttentionLayerJourney,
+    HuggingFaceAttentionLayerSummary,
     HuggingFaceAttentionRequest,
     HuggingFaceAttentionResponse,
     HuggingFaceAttentionSequenceScope,
@@ -140,6 +144,22 @@ class LoadedLocalRuntime:
     num_hidden_layers: int | None
     num_attention_heads: int | None
     attention_implementation: str | None
+
+
+@dataclass(frozen=True)
+class AttentionTokenMetadata:
+    token_id: int
+    raw_token: str
+    display_token: str
+    decoded_contribution: str
+    token_bytes: list[int]
+    full_position: int
+    analyzed_position: int
+    sequence_scope: HuggingFaceAttentionSequenceScope
+    source_category: CanonicalTokenSourceCategory
+    source_label: str
+    special_token: bool
+    generated_token_index: int | None
 
 
 @dataclass(frozen=True)
@@ -955,6 +975,18 @@ class HuggingFaceLocalProvider(LLMProvider):
                 )
 
             num_layers = len(attention_tuple)
+            comparison_layers = self._normalize_requested_attention_layers(
+                request.comparison_layers,
+                num_layers=num_layers,
+                error_code="HF_ATTENTION_COMPARISON_LAYER_OUT_OF_RANGE",
+                label="comparison layer",
+            )
+            journey_layers = self._normalize_requested_attention_layers(
+                request.journey_layers,
+                num_layers=num_layers,
+                error_code="HF_ATTENTION_JOURNEY_LAYER_OUT_OF_RANGE",
+                label="journey layer",
+            )
             if request.selected_layer >= num_layers:
                 raise LLMScopeError(
                     code="HF_ATTENTION_LAYER_OUT_OF_RANGE",
@@ -962,56 +994,80 @@ class HuggingFaceLocalProvider(LLMProvider):
                     status_code=400,
                 )
 
-            layer_attention = attention_tuple[request.selected_layer]
-            if layer_attention is None or layer_attention.ndim != 4:
-                raise LLMScopeError(
-                    code="HF_ATTENTION_UNAVAILABLE",
-                    message="The loaded Hugging Face Local runtime did not return a usable attention tensor.",
-                    status_code=503,
-                )
-
-            num_query_heads = int(layer_attention.shape[1])
-            if request.selected_head is not None and request.selected_head >= num_query_heads:
-                raise LLMScopeError(
-                    code="HF_ATTENTION_HEAD_OUT_OF_RANGE",
-                    message=f"Head {request.selected_head} is out of range for layer {request.selected_layer}.",
-                    status_code=400,
-                )
-
-            selected_attention_row = (
-                layer_attention[0, :, query_position_in_window, : query_position_in_window + 1]
-                .detach()
-                .to(torch.float32)
-                .cpu()
+            requested_layers = self._merge_requested_attention_layers(
+                request.selected_layer,
+                comparison_layers,
+                journey_layers,
             )
-            self._validate_attention_row(
-                selected_attention_row,
+            layer_rows: dict[int, Any] = {}
+            token_metadata = self._build_attention_token_metadata(
                 request=request,
                 runtime=runtime,
-                query_position=query_position,
+                analyzed_ids=analyzed_ids,
+                window_start=window_start,
             )
-            aggregated_row = self._aggregate_attention_row(
-                selected_attention_row,
-                aggregation_mode=request.aggregation_mode,
-                selected_head=request.selected_head,
-            )
-            self._validate_aggregated_attention_row(
-                aggregated_row,
-                request=request,
-                runtime=runtime,
-                query_position=query_position,
-            )
+            num_query_heads = 0
+
+            for layer_index in requested_layers:
+                layer_attention = attention_tuple[layer_index]
+                if layer_attention is None or layer_attention.ndim != 4:
+                    raise LLMScopeError(
+                        code="HF_ATTENTION_UNAVAILABLE",
+                        message="The loaded Hugging Face Local runtime did not return a usable attention tensor.",
+                        status_code=503,
+                    )
+
+                current_num_query_heads = int(layer_attention.shape[1])
+                if num_query_heads == 0:
+                    num_query_heads = current_num_query_heads
+                if request.selected_head is not None and request.selected_head >= current_num_query_heads:
+                    raise LLMScopeError(
+                        code="HF_ATTENTION_HEAD_OUT_OF_RANGE",
+                        message=f"Head {request.selected_head} is out of range for layer {layer_index}.",
+                        status_code=400,
+                    )
+
+                selected_attention_row = (
+                    layer_attention[0, :, query_position_in_window, : query_position_in_window + 1]
+                    .detach()
+                    .to(torch.float32)
+                    .cpu()
+                )
+                self._validate_attention_row(
+                    selected_attention_row,
+                    request=request,
+                    runtime=runtime,
+                    query_position=query_position,
+                )
+                aggregated_candidate = self._aggregate_attention_row(
+                    selected_attention_row,
+                    aggregation_mode=request.aggregation_mode,
+                    selected_head=request.selected_head,
+                )
+                self._validate_aggregated_attention_row(
+                    aggregated_candidate,
+                    request=request,
+                    runtime=runtime,
+                    query_position=query_position,
+                )
+                layer_rows[layer_index] = aggregated_candidate
+
+            aggregated_row = layer_rows[request.selected_layer]
 
             response = self._build_attention_response(
                 request=request,
                 runtime=runtime,
                 full_sequence_ids=full_sequence_ids,
                 analyzed_ids=analyzed_ids,
+                token_metadata=token_metadata,
                 selected_token_position=selected_token_position,
                 selected_position_in_window=selected_position_in_window,
                 query_position=query_position,
                 query_position_in_window=query_position_in_window,
                 aggregated_attention_row=aggregated_row,
+                comparison_layers=comparison_layers,
+                comparison_rows=layer_rows,
+                journey_layers=journey_layers,
                 num_layers=num_layers,
                 num_query_heads=num_query_heads,
                 context_truncated=context_truncated,
@@ -1262,6 +1318,454 @@ class HuggingFaceLocalProvider(LLMProvider):
             return torch.max(attention_row, dim=0).values
         return torch.mean(attention_row, dim=0)
 
+    def _normalize_requested_attention_layers(
+        self,
+        layers: list[int],
+        *,
+        num_layers: int,
+        error_code: str,
+        label: str,
+    ) -> list[int]:
+        normalized: list[int] = []
+        seen: set[int] = set()
+
+        for layer_index in layers:
+            if layer_index < 0 or layer_index >= num_layers:
+                raise LLMScopeError(
+                    code=error_code,
+                    message=f"The requested {label} {layer_index} is out of range for this model.",
+                    status_code=400,
+                )
+            if layer_index in seen:
+                continue
+            seen.add(layer_index)
+            normalized.append(layer_index)
+
+        return normalized
+
+    def _merge_requested_attention_layers(
+        self,
+        selected_layer: int,
+        comparison_layers: list[int],
+        journey_layers: list[int],
+    ) -> list[int]:
+        merged: list[int] = []
+        seen: set[int] = set()
+
+        for layer_index in [selected_layer, *comparison_layers, *journey_layers]:
+            if layer_index in seen:
+                continue
+            seen.add(layer_index)
+            merged.append(layer_index)
+
+        return merged
+
+    def _build_attention_token_metadata(
+        self,
+        *,
+        request: HuggingFaceAttentionRequest,
+        runtime: LoadedLocalRuntime,
+        analyzed_ids: list[int],
+        window_start: int,
+    ) -> list[AttentionTokenMetadata]:
+        prompt_length = len(request.prompt_token_ids)
+        prompt_token_by_position = {
+            token.full_position: token for token in request.prompt_tokens
+        }
+        metadata: list[AttentionTokenMetadata] = []
+
+        for analyzed_position, token_id in enumerate(analyzed_ids):
+            full_position = window_start + analyzed_position
+            sequence_scope = (
+                HuggingFaceAttentionSequenceScope.PROMPT
+                if full_position < prompt_length
+                else HuggingFaceAttentionSequenceScope.GENERATED
+            )
+            generated_token_index = full_position - prompt_length if full_position >= prompt_length else None
+            prompt_token = prompt_token_by_position.get(full_position)
+            if prompt_token is not None:
+                raw_token = prompt_token.raw_token
+                display_token = prompt_token.display_token
+                decoded_contribution = prompt_token.decoded_contribution
+                token_bytes = list(prompt_token.token_bytes)
+                source_category = prompt_token.source_category
+                source_label = prompt_token.source_label
+                special_token = prompt_token.special_token
+            else:
+                raw_token = self._raw_token(runtime.tokenizer, token_id)
+                decoded_contribution = self._decode_token(runtime.tokenizer, token_id)
+                display_token = self._display_token(decoded_contribution)
+                token_bytes = self._token_bytes(decoded_contribution, raw_token)
+                source_category = CanonicalTokenSourceCategory.GENERATED_OUTPUT
+                source_label = "Earlier output"
+                special_token = False
+
+            metadata.append(
+                AttentionTokenMetadata(
+                    token_id=token_id,
+                    raw_token=raw_token,
+                    display_token=display_token,
+                    decoded_contribution=decoded_contribution,
+                    token_bytes=token_bytes,
+                    full_position=full_position,
+                    analyzed_position=analyzed_position,
+                    sequence_scope=sequence_scope,
+                    source_category=source_category,
+                    source_label=source_label,
+                    special_token=special_token,
+                    generated_token_index=generated_token_index,
+                )
+            )
+
+        return metadata
+
+    def _build_attention_category_breakdown(
+        self,
+        analyzed_tokens: list[HuggingFaceAttentionTokenInfo],
+    ) -> HuggingFaceAttentionCategoryBreakdown:
+        totals = {
+            "assistant_prefix": 0.0,
+            "earlier_output": 0.0,
+            "input_context": 0.0,
+            "system_message": 0.0,
+            "template_control": 0.0,
+            "user_prompt": 0.0,
+        }
+
+        for token in analyzed_tokens:
+            weight = token.attention_weight if token.attention_weight is not None else 0.0
+
+            if token.sequence_scope == HuggingFaceAttentionSequenceScope.PROMPT:
+                totals["input_context"] += weight
+            else:
+                totals["earlier_output"] += weight
+
+            if token.source_category == CanonicalTokenSourceCategory.SYSTEM:
+                totals["system_message"] += weight
+            elif token.source_category == CanonicalTokenSourceCategory.USER_PROMPT:
+                totals["user_prompt"] += weight
+            elif token.source_category == CanonicalTokenSourceCategory.ASSISTANT_PREFIX:
+                totals["assistant_prefix"] += weight
+            elif token.source_category == CanonicalTokenSourceCategory.TEMPLATE:
+                totals["template_control"] += weight
+
+        exclusive_total = (
+            totals["system_message"]
+            + totals["user_prompt"]
+            + totals["assistant_prefix"]
+            + totals["template_control"]
+            + totals["earlier_output"]
+        )
+        return HuggingFaceAttentionCategoryBreakdown(
+            input_context=round(totals["input_context"], 6),
+            earlier_output=round(totals["earlier_output"], 6),
+            system_message=round(totals["system_message"], 6),
+            user_prompt=round(totals["user_prompt"], 6),
+            assistant_prefix=round(totals["assistant_prefix"], 6),
+            template_control=round(totals["template_control"], 6),
+            exclusive_total=round(exclusive_total, 6),
+        )
+
+    def _materialize_attention_view(
+        self,
+        *,
+        token_metadata: list[AttentionTokenMetadata],
+        aggregated_attention_row: Any,
+        query_position_in_window: int,
+        selected_position_in_window: int,
+        max_connections: int,
+    ) -> tuple[
+        list[HuggingFaceAttentionTokenInfo],
+        list[HuggingFaceAttentionSource],
+        list[HuggingFaceAttentionSource],
+        HuggingFaceAttentionCategoryBreakdown,
+        float,
+        float,
+    ]:
+        assert torch is not None
+        analyzed_tokens: list[HuggingFaceAttentionTokenInfo] = []
+        ranked_sources: list[tuple[float, HuggingFaceAttentionTokenInfo]] = []
+
+        for token_meta in token_metadata:
+            attention_weight = (
+                float(aggregated_attention_row[token_meta.analyzed_position].item())
+                if token_meta.analyzed_position <= query_position_in_window
+                else None
+            )
+            token_info = HuggingFaceAttentionTokenInfo(
+                token_id=token_meta.token_id,
+                raw_token=token_meta.raw_token,
+                display_token=token_meta.display_token,
+                decoded_contribution=token_meta.decoded_contribution,
+                token_bytes=list(token_meta.token_bytes),
+                full_position=token_meta.full_position,
+                analyzed_position=token_meta.analyzed_position,
+                sequence_scope=token_meta.sequence_scope,
+                source_category=token_meta.source_category,
+                source_label=token_meta.source_label,
+                special_token=token_meta.special_token,
+                generated_token_index=token_meta.generated_token_index,
+                attention_weight=round(attention_weight, 6) if attention_weight is not None else None,
+                is_query=token_meta.analyzed_position == query_position_in_window,
+                is_selected_token=token_meta.analyzed_position == selected_position_in_window,
+            )
+            analyzed_tokens.append(token_info)
+            if attention_weight is not None:
+                ranked_sources.append((attention_weight, token_info))
+
+        ranked_sources.sort(key=lambda item: (-item[0], item[1].full_position))
+        all_sources = [
+            HuggingFaceAttentionSource(
+                token_id=token_info.token_id,
+                raw_token=token_info.raw_token,
+                display_token=token_info.display_token,
+                decoded_contribution=token_info.decoded_contribution,
+                token_bytes=list(token_info.token_bytes),
+                full_position=token_info.full_position,
+                analyzed_position=token_info.analyzed_position,
+                sequence_scope=token_info.sequence_scope,
+                source_category=token_info.source_category,
+                source_label=token_info.source_label,
+                special_token=token_info.special_token,
+                generated_token_index=token_info.generated_token_index,
+                attention_weight=round(weight, 6),
+                rank=rank,
+            )
+            for rank, (weight, token_info) in enumerate(ranked_sources, start=1)
+        ]
+        top_sources = all_sources[: max(max_connections, 1)]
+        category_breakdown = self._build_attention_category_breakdown(analyzed_tokens)
+        attention_mass_sum = round(float(torch.sum(aggregated_attention_row).item()), 6)
+        top_n_coverage = round(float(sum(source.attention_weight for source in top_sources)), 6)
+        return (
+            analyzed_tokens,
+            all_sources,
+            top_sources,
+            category_breakdown,
+            attention_mass_sum,
+            top_n_coverage,
+        )
+
+    def _find_top_meaningful_source(
+        self,
+        all_sources: list[HuggingFaceAttentionSource],
+    ) -> HuggingFaceAttentionSource | None:
+        fallback: HuggingFaceAttentionSource | None = None
+        for source in all_sources:
+            if source.source_category == CanonicalTokenSourceCategory.TEMPLATE:
+                continue
+            if fallback is None:
+                fallback = source
+            token_text = source.display_token or source.decoded_contribution or source.raw_token
+            if any(character.isalnum() for character in token_text):
+                return source
+        return fallback
+
+    def _build_attention_layer_summaries(
+        self,
+        *,
+        comparison_layers: list[int],
+        layer_rows: dict[int, Any],
+        token_metadata: list[AttentionTokenMetadata],
+        query_position_in_window: int,
+        selected_position_in_window: int,
+        num_layers: int,
+        max_connections: int,
+    ) -> list[HuggingFaceAttentionLayerSummary]:
+        summaries: list[HuggingFaceAttentionLayerSummary] = []
+
+        for layer_index in comparison_layers:
+            (
+                _analyzed_tokens,
+                all_sources,
+                top_sources,
+                category_breakdown,
+                attention_mass_sum,
+                top_n_coverage,
+            ) = self._materialize_attention_view(
+                token_metadata=token_metadata,
+                aggregated_attention_row=layer_rows[layer_index],
+                query_position_in_window=query_position_in_window,
+                selected_position_in_window=selected_position_in_window,
+                max_connections=max_connections,
+            )
+            summaries.append(
+                HuggingFaceAttentionLayerSummary(
+                    layer_index=layer_index,
+                    depth_ratio=0.0 if num_layers <= 1 else round(layer_index / (num_layers - 1), 6),
+                    top_meaningful_source=self._find_top_meaningful_source(all_sources),
+                    category_breakdown=category_breakdown,
+                    attention_mass_sum=attention_mass_sum,
+                    top_n_coverage=top_n_coverage,
+                )
+            )
+
+        return summaries
+
+    def _build_attention_layer_journey(
+        self,
+        *,
+        journey_layers: list[int],
+        layer_rows: dict[int, Any],
+        token_metadata: list[AttentionTokenMetadata],
+        query_position_in_window: int,
+        selected_position_in_window: int,
+        num_layers: int,
+        max_connections: int,
+        selected_decoded_contribution: str,
+    ) -> HuggingFaceAttentionLayerJourney | None:
+        if not journey_layers:
+            return None
+
+        all_sources_by_layer: dict[int, list[HuggingFaceAttentionSource]] = {}
+        position_weight_by_layer: dict[int, dict[int, float]] = {}
+        attention_mass_by_layer: dict[int, float] = {}
+
+        for layer_index in journey_layers:
+            (
+                _analyzed_tokens,
+                all_sources,
+                _top_sources,
+                _category_breakdown,
+                attention_mass_sum,
+                _top_n_coverage,
+            ) = self._materialize_attention_view(
+                token_metadata=token_metadata,
+                aggregated_attention_row=layer_rows[layer_index],
+                query_position_in_window=query_position_in_window,
+                selected_position_in_window=selected_position_in_window,
+                max_connections=max_connections,
+            )
+            all_sources_by_layer[layer_index] = all_sources
+            position_weight_by_layer[layer_index] = {
+                source.full_position: source.attention_weight for source in all_sources
+            }
+            attention_mass_by_layer[layer_index] = attention_mass_sum
+
+        def best_source(
+            predicate: Callable[[HuggingFaceAttentionSource], bool],
+            *,
+            prefer_lexical: bool = False,
+        ) -> HuggingFaceAttentionSource | None:
+            winner: HuggingFaceAttentionSource | None = None
+            winning_tuple: tuple[int, float, int, int] | None = None
+
+            for layer_index in journey_layers:
+                for source in all_sources_by_layer[layer_index]:
+                    if not predicate(source):
+                        continue
+                    token_text = source.display_token or source.decoded_contribution or source.raw_token
+                    lexical_score = 1 if any(character.isalnum() for character in token_text) else 0
+                    candidate = (
+                        lexical_score if prefer_lexical else 0,
+                        source.attention_weight,
+                        -source.full_position,
+                        -layer_index,
+                    )
+                    if winning_tuple is None or candidate > winning_tuple:
+                        winning_tuple = candidate
+                        winner = source
+            return winner
+
+        candidate_sources = [
+            (
+                "strongest_prompt_source",
+                best_source(
+                    lambda source: (
+                        source.sequence_scope == HuggingFaceAttentionSequenceScope.PROMPT
+                        and source.source_category != CanonicalTokenSourceCategory.TEMPLATE
+                    ),
+                    prefer_lexical=True,
+                ),
+            ),
+            (
+                "strongest_earlier_output_source",
+                best_source(
+                    lambda source: source.sequence_scope == HuggingFaceAttentionSequenceScope.GENERATED,
+                    prefer_lexical=True,
+                ),
+            ),
+            (
+                "strongest_template_source",
+                best_source(
+                    lambda source: source.source_category == CanonicalTokenSourceCategory.TEMPLATE
+                ),
+            ),
+        ]
+        if selected_decoded_contribution:
+            candidate_sources.append(
+                (
+                    "exact_prompt_match",
+                    best_source(
+                        lambda source: (
+                            source.sequence_scope == HuggingFaceAttentionSequenceScope.PROMPT
+                            and source.decoded_contribution == selected_decoded_contribution
+                        )
+                    ),
+                )
+            )
+
+        rows: list[HuggingFaceAttentionJourneyRow] = []
+        used_positions: set[int] = set()
+
+        for included_reason, source in candidate_sources:
+            if source is None or source.full_position in used_positions:
+                continue
+            used_positions.add(source.full_position)
+            weights = [
+                round(position_weight_by_layer[layer_index].get(source.full_position, 0.0), 6)
+                for layer_index in journey_layers
+            ]
+            rows.append(
+                HuggingFaceAttentionJourneyRow(
+                    row_id=f"source:{source.full_position}",
+                    row_kind="source",
+                    label=source.display_token or source.raw_token,
+                    included_reason=included_reason,
+                    source=source,
+                    weights=weights,
+                    max_weight=round(max(weights) if weights else 0.0, 6),
+                )
+            )
+            if len(rows) >= max_connections:
+                break
+
+        remaining_capacity = max_connections - len(rows)
+        if remaining_capacity > 0:
+            other_weights: list[float] = []
+            for layer_index in journey_layers:
+                included_sum = sum(
+                    position_weight_by_layer[layer_index].get(source_position, 0.0)
+                    for source_position in used_positions
+                )
+                other_weights.append(
+                    round(
+                        max(attention_mass_by_layer[layer_index] - included_sum, 0.0),
+                        6,
+                    )
+                )
+
+            if any(weight > 0.02 for weight in other_weights):
+                rows.append(
+                    HuggingFaceAttentionJourneyRow(
+                        row_id="other",
+                        row_kind="other",
+                        label="Other sources",
+                        included_reason="residual_mass",
+                        source=None,
+                        weights=other_weights,
+                        max_weight=round(max(other_weights) if other_weights else 0.0, 6),
+                    )
+                )
+
+        scale_max = round(max((row.max_weight for row in rows), default=0.0), 6)
+        return HuggingFaceAttentionLayerJourney(
+            layers=journey_layers,
+            sampled=journey_layers != list(range(num_layers)),
+            scale_max=scale_max,
+            rows=rows,
+        )
+
     def _validate_attention_row(
         self,
         attention_row: Any,
@@ -1367,6 +1871,9 @@ class HuggingFaceLocalProvider(LLMProvider):
                 request.aggregation_mode.value,
                 str(request.max_connections),
                 str(request.max_context_tokens),
+                ",".join(str(layer_index) for layer_index in request.comparison_layers),
+                ",".join(str(layer_index) for layer_index in request.journey_layers),
+                str(request.journey_max_rows),
                 "truncated" if request.allow_truncated_recompute else "exact",
             ]
         )
@@ -1393,25 +1900,22 @@ class HuggingFaceLocalProvider(LLMProvider):
         runtime: LoadedLocalRuntime,
         full_sequence_ids: list[int],
         analyzed_ids: list[int],
+        token_metadata: list[AttentionTokenMetadata],
         selected_token_position: int,
         selected_position_in_window: int,
         query_position: int,
         query_position_in_window: int,
         aggregated_attention_row: Any,
+        comparison_layers: list[int],
+        comparison_rows: dict[int, Any],
+        journey_layers: list[int],
         num_layers: int,
         num_query_heads: int,
         context_truncated: bool,
         window_start: int,
         attention_implementation_used: str,
     ) -> HuggingFaceAttentionResponse:
-        assert torch is not None
-        analyzed_tokens: list[HuggingFaceAttentionTokenInfo] = []
-        sources: list[HuggingFaceAttentionSource] = []
         prompt_length = len(request.prompt_token_ids)
-        ranked_sources: list[tuple[float, HuggingFaceAttentionTokenInfo]] = []
-        prompt_token_by_position = {
-            token.full_position: token for token in request.prompt_tokens
-        }
         source_positions = [
             window_start + analyzed_position
             for analyzed_position in range(query_position_in_window + 1)
@@ -1420,82 +1924,20 @@ class HuggingFaceLocalProvider(LLMProvider):
             round(float(aggregated_attention_row[analyzed_position].item()), 6)
             for analyzed_position in range(query_position_in_window + 1)
         ]
-
-        for analyzed_position, token_id in enumerate(analyzed_ids):
-            full_position = window_start + analyzed_position
-            sequence_scope = (
-                HuggingFaceAttentionSequenceScope.PROMPT
-                if full_position < prompt_length
-                else HuggingFaceAttentionSequenceScope.GENERATED
-            )
-            generated_token_index = full_position - prompt_length if full_position >= prompt_length else None
-            prompt_token = prompt_token_by_position.get(full_position)
-            if prompt_token is not None:
-                raw_token = prompt_token.raw_token
-                display_token = prompt_token.display_token
-                decoded_contribution = prompt_token.decoded_contribution
-                token_bytes = list(prompt_token.token_bytes)
-                source_category = prompt_token.source_category
-                source_label = prompt_token.source_label
-                special_token = prompt_token.special_token
-            else:
-                raw_token = self._raw_token(runtime.tokenizer, token_id)
-                decoded_contribution = self._decode_token(runtime.tokenizer, token_id)
-                display_token = self._display_token(decoded_contribution)
-                token_bytes = self._token_bytes(decoded_contribution, raw_token)
-                source_category = CanonicalTokenSourceCategory.GENERATED_OUTPUT
-                source_label = "Earlier output"
-                special_token = False
-
-            attention_weight = (
-                float(aggregated_attention_row[analyzed_position].item())
-                if analyzed_position <= query_position_in_window
-                else None
-            )
-            token_info = HuggingFaceAttentionTokenInfo(
-                token_id=token_id,
-                raw_token=raw_token,
-                display_token=display_token,
-                decoded_contribution=decoded_contribution,
-                token_bytes=token_bytes,
-                full_position=full_position,
-                analyzed_position=analyzed_position,
-                sequence_scope=sequence_scope,
-                source_category=source_category,
-                source_label=source_label,
-                special_token=special_token,
-                generated_token_index=generated_token_index,
-                attention_weight=round(attention_weight, 6) if attention_weight is not None else None,
-                is_query=analyzed_position == query_position_in_window,
-                is_selected_token=analyzed_position == selected_position_in_window,
-            )
-            analyzed_tokens.append(token_info)
-            if attention_weight is not None:
-                ranked_sources.append((attention_weight, token_info))
-
-        ranked_sources.sort(key=lambda item: item[0], reverse=True)
-        for rank, (weight, token_info) in enumerate(ranked_sources[: request.max_connections], start=1):
-            sources.append(
-                HuggingFaceAttentionSource(
-                    token_id=token_info.token_id,
-                    raw_token=token_info.raw_token,
-                    display_token=token_info.display_token,
-                    decoded_contribution=token_info.decoded_contribution,
-                    token_bytes=list(token_info.token_bytes),
-                    full_position=token_info.full_position,
-                    analyzed_position=token_info.analyzed_position,
-                    sequence_scope=token_info.sequence_scope,
-                    source_category=token_info.source_category,
-                    source_label=token_info.source_label,
-                    special_token=token_info.special_token,
-                    generated_token_index=token_info.generated_token_index,
-                    attention_weight=round(weight, 6),
-                    rank=rank,
-                )
-            )
-
-        attention_mass_sum = float(torch.sum(aggregated_attention_row).item())
-        top_n_coverage = float(sum(source.attention_weight for source in sources))
+        (
+            analyzed_tokens,
+            all_sources,
+            sources,
+            category_breakdown,
+            attention_mass_sum,
+            top_n_coverage,
+        ) = self._materialize_attention_view(
+            token_metadata=token_metadata,
+            aggregated_attention_row=aggregated_attention_row,
+            query_position_in_window=query_position_in_window,
+            selected_position_in_window=selected_position_in_window,
+            max_connections=request.max_connections,
+        )
         selected_token = analyzed_tokens[selected_position_in_window]
         query_token = analyzed_tokens[query_position_in_window]
         return HuggingFaceAttentionResponse(
@@ -1508,6 +1950,7 @@ class HuggingFaceLocalProvider(LLMProvider):
             query_token=query_token,
             analyzed_tokens=analyzed_tokens,
             sources=sources,
+            all_sources=all_sources,
             selected_layer=request.selected_layer,
             selected_head=request.selected_head,
             aggregation_mode=request.aggregation_mode,
@@ -1526,12 +1969,32 @@ class HuggingFaceLocalProvider(LLMProvider):
             average_heads=request.aggregation_mode == HuggingFaceAttentionAggregationMode.AVERAGE_HEADS,
             source_positions=source_positions,
             attention_weights=attention_weights,
-            attention_mass_sum=round(attention_mass_sum, 6),
-            top_n_coverage=round(top_n_coverage, 6),
+            attention_mass_sum=attention_mass_sum,
+            top_n_coverage=top_n_coverage,
             truncated_context=context_truncated,
             context_truncated=context_truncated,
             original_full_context_length=len(full_sequence_ids),
             analyzed_context_length=len(analyzed_ids),
+            category_breakdown=category_breakdown,
+            comparison_layers=self._build_attention_layer_summaries(
+                comparison_layers=comparison_layers,
+                layer_rows=comparison_rows,
+                token_metadata=token_metadata,
+                query_position_in_window=query_position_in_window,
+                selected_position_in_window=selected_position_in_window,
+                num_layers=num_layers,
+                max_connections=request.max_connections,
+            ),
+            layer_journey=self._build_attention_layer_journey(
+                journey_layers=journey_layers,
+                layer_rows=comparison_rows,
+                token_metadata=token_metadata,
+                query_position_in_window=query_position_in_window,
+                selected_position_in_window=selected_position_in_window,
+                num_layers=num_layers,
+                max_connections=request.journey_max_rows,
+                selected_decoded_contribution=selected_token.decoded_contribution,
+            ),
         )
 
     def _ordered_supported_models(self, recommended_model_id: str | None) -> list[SupportedLocalModel]:

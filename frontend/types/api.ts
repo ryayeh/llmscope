@@ -13,6 +13,7 @@ export type CanonicalTokenSourceCategory =
 export type HuggingFaceAttentionAnalysisMode = "prediction" | "representation";
 export type HuggingFaceAttentionAggregationMode = "single_head" | "average_heads" | "max_heads";
 export type HuggingFaceAttentionSequenceScope = "prompt" | "generated";
+export type HuggingFaceAttentionJourneyRowKind = "source" | "other";
 
 export interface ProviderCapabilitiesDetail {
   supports_logprobs: boolean;
@@ -256,6 +257,139 @@ export interface NodeExpansionRequest {
 export interface ContinueGenerationRequest extends NodeExpansionRequest {
   cached_segment_id?: string | null;
   cached_token_index?: number | null;
+}
+
+export interface HuggingFaceAttentionRequest {
+  model_id: string;
+  model_revision?: string | null;
+  tokenizer_identity?: string | null;
+  tokenizer_revision?: string | null;
+  prompt_token_ids: number[];
+  prompt_tokens: CanonicalPromptToken[];
+  generated_token_ids: number[];
+  selected_generated_token_index: number;
+  selected_layer: number;
+  selected_head?: number | null;
+  analysis_mode: HuggingFaceAttentionAnalysisMode;
+  aggregation_mode: HuggingFaceAttentionAggregationMode;
+  comparison_layers?: number[];
+  journey_layers?: number[];
+  journey_max_rows?: number;
+  max_connections: number;
+  max_context_tokens: number;
+  allow_truncated_recompute: boolean;
+}
+
+export interface HuggingFaceAttentionTokenInfo {
+  token_id: number;
+  raw_token: string;
+  display_token: string;
+  decoded_contribution: string;
+  token_bytes: number[];
+  full_position: number;
+  analyzed_position: number;
+  sequence_scope: HuggingFaceAttentionSequenceScope;
+  source_category: CanonicalTokenSourceCategory;
+  source_label: string;
+  special_token: boolean;
+  generated_token_index?: number | null;
+  attention_weight?: number | null;
+  is_query: boolean;
+  is_selected_token: boolean;
+}
+
+export interface HuggingFaceAttentionSource {
+  token_id: number;
+  raw_token: string;
+  display_token: string;
+  decoded_contribution: string;
+  token_bytes: number[];
+  full_position: number;
+  analyzed_position: number;
+  sequence_scope: HuggingFaceAttentionSequenceScope;
+  source_category: CanonicalTokenSourceCategory;
+  source_label: string;
+  special_token: boolean;
+  generated_token_index?: number | null;
+  attention_weight: number;
+  rank: number;
+}
+
+export interface HuggingFaceAttentionCategoryBreakdown {
+  input_context: number;
+  earlier_output: number;
+  system_message: number;
+  user_prompt: number;
+  assistant_prefix: number;
+  template_control: number;
+  exclusive_total: number;
+}
+
+export interface HuggingFaceAttentionLayerSummary {
+  layer_index: number;
+  depth_ratio: number;
+  top_meaningful_source?: HuggingFaceAttentionSource | null;
+  category_breakdown: HuggingFaceAttentionCategoryBreakdown;
+  attention_mass_sum: number;
+  top_n_coverage: number;
+}
+
+export interface HuggingFaceAttentionJourneyRow {
+  row_id: string;
+  row_kind: HuggingFaceAttentionJourneyRowKind;
+  label: string;
+  included_reason: string;
+  source?: HuggingFaceAttentionSource | null;
+  weights: number[];
+  max_weight: number;
+}
+
+export interface HuggingFaceAttentionLayerJourney {
+  layers: number[];
+  sampled: boolean;
+  scale_max: number;
+  rows: HuggingFaceAttentionJourneyRow[];
+}
+
+export interface HuggingFaceAttentionResponse {
+  provider: "hugging_face";
+  model_id: string;
+  model_revision?: string | null;
+  tokenizer_identity?: string | null;
+  tokenizer_revision?: string | null;
+  analysis_mode: HuggingFaceAttentionAnalysisMode;
+  selected_token: HuggingFaceAttentionTokenInfo;
+  query_token: HuggingFaceAttentionTokenInfo;
+  analyzed_tokens: HuggingFaceAttentionTokenInfo[];
+  sources: HuggingFaceAttentionSource[];
+  all_sources: HuggingFaceAttentionSource[];
+  selected_layer: number;
+  selected_head?: number | null;
+  aggregation_mode: HuggingFaceAttentionAggregationMode;
+  attention_implementation_used: string;
+  num_layers: number;
+  num_query_heads: number;
+  selected_token_position: number;
+  query_position: number;
+  selected_token_id: number;
+  query_token_id: number;
+  prompt_token_count: number;
+  generated_token_index: number;
+  sequence_length: number;
+  layer_index: number;
+  head_index?: number | null;
+  average_heads: boolean;
+  source_positions: number[];
+  attention_weights: number[];
+  attention_mass_sum: number;
+  top_n_coverage: number;
+  truncated_context: boolean;
+  context_truncated: boolean;
+  original_full_context_length: number;
+  analyzed_context_length: number;
+  category_breakdown: HuggingFaceAttentionCategoryBreakdown;
+  comparison_layers: HuggingFaceAttentionLayerSummary[];
+  layer_journey?: HuggingFaceAttentionLayerJourney | null;
 }
 
 export interface NodeExpansionCandidate {

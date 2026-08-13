@@ -41,6 +41,9 @@ import {
   type CurrentRealityTokenItem,
   type CurrentRealityTokenGroup,
 } from "@/components/canvas/current-reality-panel";
+import { AttentionDepthComparison } from "@/components/canvas/attention-depth-comparison";
+import { AttentionDepthControl } from "@/components/canvas/attention-depth-control";
+import { AttentionLayerJourney } from "@/components/canvas/attention-layer-journey";
 import {
   GenerationPanel,
   type GenerationPanelSystemPromptState,
@@ -74,6 +77,20 @@ import {
   resolvePromptAnchorNode,
   summarizePromptDisplayNodes,
 } from "@/lib/attention-lens";
+import {
+  buildAllAttentionSourceRows,
+  buildAttentionCategoryRows,
+  buildAttentionCopyPayload,
+  buildAttentionNarrative,
+  buildGroupedAttentionSourceRows,
+  getAttentionDepthSummary,
+  getAttentionJourneyLayers,
+  getRepresentativeAttentionLayers,
+  shouldShowAttentionSinkNote,
+  type AttentionSourceSort,
+  type AttentionSourceView,
+  type GroupedAttentionSourceRow,
+} from "@/lib/attention-guided";
 import { shouldReuseContinuationTarget } from "@/lib/continuation-flow";
 import {
   buildBranchBreadcrumb,
@@ -2307,7 +2324,12 @@ function Workspace() {
   const [attentionAdvancedOpen, setAttentionAdvancedOpen] = useState(false);
   const [attentionHeadIndex, setAttentionHeadIndex] = useState(0);
   const [attentionTopN, setAttentionTopN] = useState(8);
-  const [showAllAttentionTokens, setShowAllAttentionTokens] = useState(false);
+  const [attentionSourceView, setAttentionSourceView] = useState<AttentionSourceView>("grouped");
+  const [attentionSourceSort, setAttentionSourceSort] = useState<AttentionSourceSort>("weight");
+  const [attentionCompareOpen, setAttentionCompareOpen] = useState(false);
+  const [attentionJourneyOpen, setAttentionJourneyOpen] = useState(false);
+  const [attentionTemplateGroupExpanded, setAttentionTemplateGroupExpanded] = useState(false);
+  const [attentionCopyState, setAttentionCopyState] = useState<"idle" | "copied" | "error">("idle");
   const [showPromptTokens, setShowPromptTokens] = useState(false);
   const [attentionAnalysis, setAttentionAnalysis] = useState<HuggingFaceAttentionResponse | null>(null);
   const [attentionError, setAttentionError] = useState<string | null>(null);
@@ -2540,27 +2562,44 @@ function Workspace() {
       ),
     [attentionValidation, promptTokensAvailable, selectedGraphNode],
   );
-  const attentionDefaultLayer = useMemo(
-    () => Math.max((huggingFaceLocalStatus?.active_model_num_hidden_layers ?? 1) - 1, 0),
-    [huggingFaceLocalStatus?.active_model_num_hidden_layers],
+  const attentionLayerCount = attentionAnalysis?.num_layers ??
+    huggingFaceLocalStatus?.active_model_num_hidden_layers ??
+    0;
+  const attentionRepresentativeLayers = useMemo(
+    () => getRepresentativeAttentionLayers(Math.max(attentionLayerCount, 1)),
+    [attentionLayerCount],
   );
-  const effectiveAttentionLayer = attentionLayer ?? attentionDefaultLayer;
+  const attentionDefaultLayer = useMemo(
+    () => attentionRepresentativeLayers.middle,
+    [attentionRepresentativeLayers],
+  );
+  const effectiveAttentionLayer = useMemo(
+    () =>
+      Math.min(
+        attentionLayer ?? attentionDefaultLayer,
+        Math.max(attentionLayerCount - 1, 0),
+      ),
+    [attentionDefaultLayer, attentionLayer, attentionLayerCount],
+  );
   const effectiveAttentionHead = attentionAggregationMode === "single_head" ? attentionHeadIndex : null;
-  const canShowAllAttentionTokens = useMemo(
-    () => (attentionAnalysis?.analyzed_context_length ?? 0) <= 40,
-    [attentionAnalysis?.analyzed_context_length],
+  const attentionComparisonLayers = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          attentionRepresentativeLayers.earlier,
+          attentionRepresentativeLayers.middle,
+          attentionRepresentativeLayers.later,
+        ]),
+      ),
+    [attentionRepresentativeLayers],
+  );
+  const attentionJourneyLayers = useMemo(
+    () => getAttentionJourneyLayers(attentionLayerCount),
+    [attentionLayerCount],
   );
   const attentionMaxConnections = useMemo(
-    () =>
-      showAllAttentionTokens && canShowAllAttentionTokens && attentionAnalysis
-        ? Math.max(attentionAnalysis.analyzed_context_length - 1, 1)
-        : attentionTopN,
-    [
-      attentionAnalysis,
-      attentionTopN,
-      canShowAllAttentionTokens,
-      showAllAttentionTokens,
-    ],
+    () => attentionTopN,
+    [attentionTopN],
   );
   const attentionRequest = useMemo(() => {
     if (
@@ -2578,7 +2617,10 @@ function Workspace() {
       allowTruncatedRecompute: false,
       analysisMode: attentionAnalysisMode,
       aggregationMode: attentionAggregationMode,
+      comparisonLayers: attentionComparisonLayers,
       generatedTokenIds: attentionValidation.generatedPrefixTokenIds,
+      journeyLayers: attentionJourneyLayers,
+      journeyMaxRows: 5,
       maxConnections: attentionMaxConnections,
       maxContextTokens: 256,
       modelId: selectedGraphNode.data.requestModel,
@@ -2599,7 +2641,9 @@ function Workspace() {
     attentionAnalysisMode,
     attentionAggregationMode,
     attentionAvailable,
+    attentionComparisonLayers,
     attentionLensEnabled,
+    attentionJourneyLayers,
     attentionMaxConnections,
     attentionValidation,
     effectiveAttentionHead,
@@ -2617,9 +2661,6 @@ function Workspace() {
   );
   const attentionHeadCount = attentionAnalysis?.num_query_heads ??
     huggingFaceLocalStatus?.active_model_num_attention_heads ??
-    0;
-  const attentionLayerCount = attentionAnalysis?.num_layers ??
-    huggingFaceLocalStatus?.active_model_num_hidden_layers ??
     0;
   const inspectorAlternativeView = useMemo(
     () =>
@@ -2701,45 +2742,29 @@ function Workspace() {
     () => {
       const breakdown = {
         assistantPrefix: 0,
+        earlierOutput: 0,
         generatedOutput: 0,
+        inputContext: 0,
         prompt: 0,
         system: 0,
         template: 0,
         userPrompt: 0,
       };
 
-      if (!attentionAnalysis) {
+      if (!attentionAnalysis?.category_breakdown) {
         return breakdown;
       }
 
-      for (const token of attentionAnalysis.analyzed_tokens) {
-        const weight = typeof token.attention_weight === "number" ? token.attention_weight : 0;
-
-        if (token.sequence_scope === "prompt") {
-          breakdown.prompt += weight;
-        } else {
-          breakdown.generatedOutput += weight;
-        }
-
-        switch (token.source_category) {
-          case "assistant_prefix":
-            breakdown.assistantPrefix += weight;
-            break;
-          case "system":
-            breakdown.system += weight;
-            break;
-          case "template":
-            breakdown.template += weight;
-            break;
-          case "user_prompt":
-            breakdown.userPrompt += weight;
-            break;
-          default:
-            break;
-        }
-      }
-
-      return breakdown;
+      return {
+        assistantPrefix: attentionAnalysis.category_breakdown.assistant_prefix,
+        earlierOutput: attentionAnalysis.category_breakdown.earlier_output,
+        generatedOutput: attentionAnalysis.category_breakdown.earlier_output,
+        inputContext: attentionAnalysis.category_breakdown.input_context,
+        prompt: attentionAnalysis.category_breakdown.input_context,
+        system: attentionAnalysis.category_breakdown.system_message,
+        template: attentionAnalysis.category_breakdown.template_control,
+        userPrompt: attentionAnalysis.category_breakdown.user_prompt,
+      };
     },
     [attentionAnalysis],
   );
@@ -3091,7 +3116,7 @@ function Workspace() {
   const selectedNodeDisplayLabel = selectedNode
     ? getDisplayLabelForTokenMode(selectedNode.data, tokenDisplayMode)
     : "Select a token";
-  const attentionSourceEntries = useMemo(() => {
+  const attentionHighlightedSourceEntries = useMemo(() => {
     if (!attentionAnalysis || !attentionValidation) {
       return [];
     }
@@ -3125,21 +3150,55 @@ function Workspace() {
     promptNodeIdByPosition,
     promptTokensVisible,
   ]);
-  const attentionSourceEntryById = useMemo(
-    () => new Map(attentionSourceEntries.map((entry) => [entry.sourceId, entry])),
-    [attentionSourceEntries],
+  const attentionAllSourceEntries = useMemo(() => {
+    if (!attentionAnalysis || !attentionValidation) {
+      return [];
+    }
+
+    return attentionAnalysis.all_sources.map((source) => {
+      const sourceId = buildAttentionTokenId(source.sequence_scope, source.full_position);
+      const graphNodeId =
+        source.sequence_scope === "generated"
+          ? attentionValidation.lineageNodeIds[(source.generated_token_index ?? -1) + 1] ?? null
+          : promptTokensVisible
+            ? (promptNodeIdByPosition.get(source.full_position) ?? null)
+            : "root";
+      const sourceLabel =
+        source.sequence_scope === "prompt" && !promptTokensVisible
+          ? "Prompt summary"
+          : source.source_label;
+
+      return {
+        graphNodeId,
+        isCanvasNodeUnavailable: graphNodeId === null,
+        source: {
+          ...source,
+          source_label: sourceLabel,
+        },
+        sourceId,
+      };
+    });
+  }, [
+    attentionAnalysis,
+    attentionValidation,
+    promptNodeIdByPosition,
+    promptTokensVisible,
+  ]);
+  const attentionAllSourceEntryById = useMemo(
+    () => new Map(attentionAllSourceEntries.map((entry) => [entry.sourceId, entry])),
+    [attentionAllSourceEntries],
   );
   const visibleAttentionSourceCount = useMemo(
     () =>
-      attentionSourceEntries.filter(
+      attentionHighlightedSourceEntries.filter(
         (entry) => entry.graphNodeId !== null && displayNodeMap.has(entry.graphNodeId),
       ).length,
-    [attentionSourceEntries, displayNodeMap],
+    [attentionHighlightedSourceEntries, displayNodeMap],
   );
   const canFocusAttention =
     attentionLensEnabled &&
     Boolean(selectedGraphNode?.id) &&
-    attentionSourceEntries.some((entry) => entry.graphNodeId !== null);
+    attentionHighlightedSourceEntries.some((entry) => entry.graphNodeId !== null);
   const showAttentionInspectorSection =
     Boolean(
       selectedNode &&
@@ -3150,6 +3209,137 @@ function Workspace() {
           null
         ) === "hugging_face",
     );
+  const attentionDepthSummary = useMemo(
+    () => getAttentionDepthSummary(effectiveAttentionLayer, Math.max(attentionLayerCount, 1)),
+    [attentionLayerCount, effectiveAttentionLayer],
+  );
+  const attentionGroupedRows = useMemo<GroupedAttentionSourceRow[]>(
+    () =>
+      attentionAnalysis
+        ? buildGroupedAttentionSourceRows(attentionAnalysis, attentionTopN)
+        : [],
+    [attentionAnalysis, attentionTopN],
+  );
+  const attentionAllRows = useMemo(
+    () =>
+      attentionAnalysis
+        ? buildAllAttentionSourceRows(attentionAnalysis, attentionSourceSort)
+        : [],
+    [attentionAnalysis, attentionSourceSort],
+  );
+  const attentionGroupedDisplayRows = useMemo(
+    () =>
+      attentionGroupedRows.map((row) => ({
+        ...row,
+        members: row.members.map((member) => {
+          const sourceId = buildAttentionTokenId(member.sequence_scope, member.full_position);
+          return {
+            entry: attentionAllSourceEntryById.get(sourceId) ?? null,
+            source: member,
+            sourceId,
+          };
+        }),
+      })),
+    [attentionAllSourceEntryById, attentionGroupedRows],
+  );
+  const attentionAllDisplayRows = useMemo(
+    () =>
+      attentionAllRows.map((source) => {
+        const sourceId = buildAttentionTokenId(source.sequence_scope, source.full_position);
+        return {
+          entry: attentionAllSourceEntryById.get(sourceId) ?? null,
+          source,
+          sourceId,
+        };
+      }),
+    [attentionAllRows, attentionAllSourceEntryById],
+  );
+  const attentionSourceEntries = useMemo(() => {
+    if (attentionSourceView === "all_tokens") {
+      return attentionAllDisplayRows.map(({ entry, source, sourceId }) => ({
+        graphNodeId: entry?.graphNodeId ?? null,
+        isCanvasNodeUnavailable: entry?.isCanvasNodeUnavailable ?? true,
+        source,
+        sourceId,
+      }));
+    }
+
+    const nextEntries: Array<{
+      graphNodeId: string | null;
+      isCanvasNodeUnavailable: boolean;
+      source: (typeof attentionAllDisplayRows)[number]["source"];
+      sourceId: string;
+    }> = [];
+
+    for (const row of attentionGroupedDisplayRows) {
+      if (row.rowKind === "group") {
+        const representative = row.members[0]?.source;
+        if (!representative) {
+          continue;
+        }
+        nextEntries.push({
+          graphNodeId: null,
+          isCanvasNodeUnavailable: false,
+          source: {
+            ...representative,
+            attention_weight: row.weight,
+            display_token: row.label,
+            raw_token: row.label,
+            source_label: row.meta,
+          },
+          sourceId: row.id,
+        });
+
+        if (attentionTemplateGroupExpanded) {
+          for (const member of row.members) {
+            nextEntries.push({
+              graphNodeId: member.entry?.graphNodeId ?? null,
+              isCanvasNodeUnavailable: member.entry?.isCanvasNodeUnavailable ?? true,
+              source: member.source,
+              sourceId: member.sourceId,
+            });
+          }
+        }
+        continue;
+      }
+
+      const member = row.members[0];
+      if (!member) {
+        continue;
+      }
+      nextEntries.push({
+        graphNodeId: member.entry?.graphNodeId ?? null,
+        isCanvasNodeUnavailable: member.entry?.isCanvasNodeUnavailable ?? true,
+        source: member.source,
+        sourceId: member.sourceId,
+      });
+    }
+
+    return nextEntries;
+  }, [
+    attentionAllDisplayRows,
+    attentionGroupedDisplayRows,
+    attentionSourceView,
+    attentionTemplateGroupExpanded,
+  ]);
+  const attentionCategoryRows = useMemo(
+    () =>
+      attentionAnalysis?.category_breakdown
+        ? buildAttentionCategoryRows(attentionAnalysis.category_breakdown)
+        : [],
+    [attentionAnalysis?.category_breakdown],
+  );
+  const attentionNarrative = useMemo(
+    () =>
+      attentionAnalysis
+        ? buildAttentionNarrative(attentionAnalysis, attentionDepthSummary, attentionGroupedRows)
+        : null,
+    [attentionAnalysis, attentionDepthSummary, attentionGroupedRows],
+  );
+  const attentionSinkNoteVisible = Boolean(
+    attentionAnalysis?.category_breakdown &&
+      shouldShowAttentionSinkNote(attentionAnalysis.category_breakdown),
+  );
   const attentionHeadline =
     attentionAnalysisMode === "representation"
       ? `How "${selectedNodeDisplayLabel}" attended backward after entering the sequence`
@@ -3564,7 +3754,7 @@ function Workspace() {
       const relevantNodeIds = new Set<string>([
         ...promptDisplaySummary.promptNodeIds,
         ...(selectedGraphNode?.id ? [selectedGraphNode.id] : []),
-        ...attentionSourceEntries
+        ...attentionHighlightedSourceEntries
           .map((entry) => entry.graphNodeId)
           .filter((nodeId): nodeId is string => Boolean(nodeId)),
         ...(options?.focusCandidateIds ?? []),
@@ -3685,7 +3875,7 @@ function Workspace() {
       return snapshot;
     },
     [
-      attentionSourceEntries,
+      attentionHighlightedSourceEntries,
       displayNodeMap,
       displayNodes,
       generationPromptTokens.length,
@@ -3697,7 +3887,7 @@ function Workspace() {
     ],
   );
 
-  const computeAttentionFocusViewport = useCallback(() => {
+  const computeAttentionFocusViewport = useCallback((options?: { sourceNodeIdsOverride?: string[] }) => {
     const instance = flowRef.current;
     const containerElement = document.querySelector(".react-flow");
 
@@ -3733,9 +3923,12 @@ function Workspace() {
         } | null;
       }
     ).getInternalNode;
-    const sourceNodeIds = attentionSourceEntries
-      .map((entry) => entry.graphNodeId)
-      .filter((nodeId): nodeId is string => Boolean(nodeId));
+    const sourceNodeIds = (
+      options?.sourceNodeIdsOverride ??
+      attentionHighlightedSourceEntries
+        .map((entry) => entry.graphNodeId)
+        .filter((nodeId): nodeId is string => Boolean(nodeId))
+    ).filter((nodeId, index, collection) => collection.indexOf(nodeId) === index);
     const focusResult = buildDeterministicFocusViewport({
       containerHeight: containerRect.height,
       containerWidth: containerRect.width,
@@ -3781,7 +3974,7 @@ function Workspace() {
     });
 
     return focusResult;
-  }, [attentionSourceEntries, logAttentionDiagnostics, selectedGraphNode?.id]);
+  }, [attentionHighlightedSourceEntries, logAttentionDiagnostics, selectedGraphNode?.id]);
 
   const focusAttentionNeighborhood = useCallback(async () => {
     if (!attentionLensEnabled || !selectedGraphNode?.id) {
@@ -3789,17 +3982,36 @@ function Workspace() {
       return false;
     }
 
-    const hasPromptSources = attentionSourceEntries.some(
+    const hasPromptSources = attentionHighlightedSourceEntries.some(
       (entry) => entry.source.sequence_scope === "prompt",
     );
 
+    let sourceNodeIdsOverride: string[] | undefined;
+
     if (hasPromptSources && !promptTokensVisible) {
       setShowPromptTokens(true);
-      await waitForAnimationFrames(2);
-      await waitForAnimationFrames(2);
+      for (let attempt = 0; attempt < 16; attempt += 1) {
+        await waitForAnimationFrames(1);
+        const livePromptNodes =
+          flowRef.current
+            ?.getNodes()
+            .filter((node) => isPromptTokenNodeId(node.id) && !node.hidden) ?? [];
+        if (livePromptNodes.length > 0) {
+          await waitForAnimationFrames(2);
+          break;
+        }
+      }
+
+      sourceNodeIdsOverride = attentionHighlightedSourceEntries
+        .map((entry) =>
+          entry.source.sequence_scope === "prompt"
+            ? buildPromptTokenNodeId(entry.source.full_position)
+            : entry.graphNodeId,
+        )
+        .filter((nodeId): nodeId is string => Boolean(nodeId));
     }
 
-    const focusResult = computeAttentionFocusViewport();
+    const focusResult = computeAttentionFocusViewport({ sourceNodeIdsOverride });
 
     if (!focusResult?.viewport || !flowRef.current) {
       console.warn("[llmscope-attention] focus-attention-unavailable");
@@ -3823,7 +4035,7 @@ function Workspace() {
     return true;
   }, [
     attentionLensEnabled,
-    attentionSourceEntries,
+    attentionHighlightedSourceEntries,
     computeAttentionFocusViewport,
     logAttentionDiagnostics,
     promptTokensVisible,
@@ -3839,6 +4051,8 @@ function Workspace() {
     setAttentionAnalysis((currentValue) => (currentValue === null ? currentValue : null));
     setPinnedAttentionSourceIds((currentValue) => (currentValue.length === 0 ? currentValue : []));
     setAttentionError((currentValue) => (currentValue === null ? currentValue : null));
+    setAttentionTemplateGroupExpanded(false);
+    setAttentionCopyState("idle");
     setAttentionLoading(false);
     attentionViewportRef.current = null;
 
@@ -3867,6 +4081,11 @@ function Workspace() {
   }, [promptTokensAvailable]);
 
   const handleAttentionSourceFocus = useCallback((sourceId: string, graphNodeId: string | null) => {
+    if (sourceId === "template-group") {
+      setAttentionTemplateGroupExpanded((currentValue) => !currentValue);
+      return;
+    }
+
     setPinnedAttentionSourceIds((currentValue) =>
       currentValue.length === 1 && currentValue[0] === sourceId ? [] : [sourceId],
     );
@@ -3881,6 +4100,33 @@ function Workspace() {
       sourceId,
     });
   }, [displayNodeMap]);
+  const handleAttentionLayerSelect = useCallback((layerIndex: number) => {
+    setAttentionLayer((currentValue) => (currentValue === layerIndex ? currentValue : layerIndex));
+    setAttentionCopyState("idle");
+  }, []);
+  const handleCopyAttentionJson = useCallback(async () => {
+    if (!attentionAnalysis) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(
+        buildAttentionCopyPayload(attentionAnalysis, {
+          layerSummary: attentionDepthSummary,
+          sourceSort: attentionSourceSort,
+          sourceView: attentionSourceView,
+        }),
+      );
+      setAttentionCopyState("copied");
+    } catch {
+      setAttentionCopyState("error");
+    }
+  }, [
+    attentionAnalysis,
+    attentionDepthSummary,
+    attentionSourceSort,
+    attentionSourceView,
+  ]);
 
   useEffect(() => {
     nodesRef.current = graphNodes;
@@ -3908,7 +4154,12 @@ function Workspace() {
     setAttentionAnalysis((currentValue) => (currentValue === null ? currentValue : null));
     setPinnedAttentionSourceIds((currentValue) => (currentValue.length === 0 ? currentValue : []));
     setAttentionAdvancedOpen(false);
-    setShowAllAttentionTokens(false);
+    setAttentionCompareOpen(false);
+    setAttentionJourneyOpen(false);
+    setAttentionTemplateGroupExpanded(false);
+    setAttentionSourceView("grouped");
+    setAttentionSourceSort("weight");
+    setAttentionCopyState("idle");
     setShowPromptTokens(false);
     setAttentionError((currentValue) => (currentValue === null ? currentValue : null));
     setAttentionLoading(false);
@@ -3975,6 +4226,8 @@ function Workspace() {
     }
 
     setPinnedAttentionSourceIds((currentValue) => (currentValue.length === 0 ? currentValue : []));
+    setAttentionTemplateGroupExpanded(false);
+    setAttentionCopyState("idle");
     setAttentionAnalysis((currentValue) => (currentValue === null ? currentValue : null));
   }, [attentionLensEnabled, selectedGraphNode?.id]);
 
@@ -6576,7 +6829,7 @@ function Workspace() {
         }}
         onToggleCollapse={() => setIsSentenceBarExpanded((currentValue) => !currentValue)}
         onToggleAttentionPin={(tokenId) =>
-          handleAttentionSourceFocus(tokenId, attentionSourceEntryById.get(tokenId)?.graphNodeId ?? null)
+          handleAttentionSourceFocus(tokenId, attentionAllSourceEntryById.get(tokenId)?.graphNodeId ?? null)
         }
         probabilityMode={probabilityViewMode}
         remainingProbabilityMass={
@@ -6904,18 +7157,25 @@ function Workspace() {
 
                   {attentionLensEnabled ? (
                     <>
-                      <div className="attention-summary">
-                        <p className="attention-summary__title">{attentionHeadline}</p>
-                        <p className="attention-controls__hint" title={ATTENTION_LENS_TOOLTIP}>
-                          {ATTENTION_LENS_TOOLTIP}
-                        </p>
-                      </div>
+                      <AttentionDepthControl
+                        comparePressed={attentionCompareOpen}
+                        disabled={attentionLoading || attentionLayerCount <= 0}
+                        layerCount={Math.max(attentionLayerCount, 1)}
+                        onLayerChange={handleAttentionLayerSelect}
+                        onOpenCompare={() =>
+                          setAttentionCompareOpen((currentValue) => !currentValue)
+                        }
+                        selectedLayer={effectiveAttentionLayer}
+                      />
                       <p className="attention-controls__hint attention-controls__hint--muted">
-                        Temporary eager attention may run more slowly on local Qwen models.
+                        Earlier, middle, and later are location labels, not guaranteed cognitive
+                        stages. Temporary eager attention may run more slowly on local Qwen models.
                       </p>
 
-                      {attentionLoading ? (
-                        <div className="inspector-empty">Computing attention...</div>
+                      {attentionLoading && !attentionAnalysis ? (
+                        <div className="inspector-empty">
+                          Calculating Layer {effectiveAttentionLayer}...
+                        </div>
                       ) : null}
                       {attentionError ? (
                         <div className="inspector-empty">{attentionError}</div>
@@ -6925,6 +7185,30 @@ function Workspace() {
                       ) : null}
                       {attentionAnalysis ? (
                         <>
+                          <div className="attention-panel">
+                            <p className="attention-panel__eyebrow">
+                              {attentionAnalysisMode === "representation"
+                                ? "Representation view"
+                                : "Prediction view"}
+                            </p>
+                            <p className="attention-panel__title">
+                              {attentionNarrative?.headline ?? attentionHeadline}
+                            </p>
+                            <p className="attention-controls__hint">
+                              {attentionNarrative?.preface ?? ATTENTION_LENS_TOOLTIP}
+                            </p>
+                            <p className="attention-panel__meta">
+                              {attentionNarrative?.depthLine ?? `Layer ${effectiveAttentionLayer}`}
+                            </p>
+                            <div className="attention-panel__bullets">
+                              {(attentionNarrative?.bullets ?? []).map((bullet) => (
+                                <p key={bullet}>{bullet}</p>
+                              ))}
+                            </div>
+                            <p className="attention-panel__note">
+                              {attentionNarrative?.note ?? ATTENTION_LENS_TOOLTIP}
+                            </p>
+                          </div>
                           <div className="attention-legend">
                             <span className="attention-legend__item">
                               <span className="attention-legend__swatch attention-legend__swatch--arc" />
@@ -6939,10 +7223,10 @@ function Workspace() {
                           </div>
                           <div className="attention-breakdown">
                             <span className="inspector-inline-badge">
-                              Prompt attention {formatPercent(attentionMassBreakdown.prompt)}
+                              Input context {formatPercent(attentionMassBreakdown.inputContext)}
                             </span>
                             <span className="inspector-inline-badge">
-                              Earlier output {formatPercent(attentionMassBreakdown.generatedOutput)}
+                              Earlier output {formatPercent(attentionMassBreakdown.earlierOutput)}
                             </span>
                             <span className="inspector-inline-badge">
                               Template/control {formatPercent(attentionMassBreakdown.template)}
@@ -6950,6 +7234,106 @@ function Workspace() {
                             <span className="inspector-inline-badge">
                               Top N coverage {formatPercent(attentionAnalysis.top_n_coverage)}
                             </span>
+                          </div>
+                          <div className="attention-category-grid">
+                            {attentionCategoryRows.map((row) => (
+                              <div key={row.label} className="attention-category-grid__item">
+                                <dt>{row.label}</dt>
+                                <dd>{formatPercent(row.value)}</dd>
+                              </div>
+                            ))}
+                          </div>
+                          {attentionSinkNoteVisible ? (
+                            <p className="attention-sink-note">
+                              Formatting tokens can act as attention sinks, especially when heads
+                              are averaged. High attention here does not necessarily indicate
+                              semantic importance.
+                            </p>
+                          ) : null}
+                          <details
+                            className="inspector-details"
+                            onToggle={(event) =>
+                              setAttentionCompareOpen(
+                                (event.currentTarget as HTMLDetailsElement).open,
+                              )
+                            }
+                            open={attentionCompareOpen}
+                          >
+                            <summary>Compare depths</summary>
+                            <AttentionDepthComparison
+                              layerCount={Math.max(attentionLayerCount, 1)}
+                              loading={attentionLoading}
+                              onSelectLayer={handleAttentionLayerSelect}
+                              selectedLayer={effectiveAttentionLayer}
+                              summaries={attentionAnalysis.comparison_layers}
+                            />
+                          </details>
+                          <details
+                            className="inspector-details"
+                            onToggle={(event) =>
+                              setAttentionJourneyOpen(
+                                (event.currentTarget as HTMLDetailsElement).open,
+                              )
+                            }
+                            open={attentionJourneyOpen}
+                          >
+                            <summary>Layer journey</summary>
+                            <AttentionLayerJourney
+                              headLabel={attentionHeadLabel}
+                              journey={attentionAnalysis.layer_journey}
+                              loading={attentionLoading}
+                              onSelectLayer={handleAttentionLayerSelect}
+                              selectedLayer={effectiveAttentionLayer}
+                            />
+                          </details>
+                          <div className="attention-controls__row">
+                            <button
+                              aria-pressed={attentionSourceView === "grouped"}
+                              className="explorer-button explorer-button--ghost"
+                              onClick={() => setAttentionSourceView("grouped")}
+                              type="button"
+                            >
+                              Grouped
+                            </button>
+                            <button
+                              aria-pressed={attentionSourceView === "all_tokens"}
+                              className="explorer-button explorer-button--ghost"
+                              onClick={() => setAttentionSourceView("all_tokens")}
+                              type="button"
+                            >
+                              All tokens
+                            </button>
+                            {attentionSourceView === "all_tokens" ? (
+                              <label className="attention-controls__label">
+                                <span>Sort</span>
+                                <select
+                                  className="explorer-select"
+                                  disabled={attentionLoading}
+                                  onChange={(event) =>
+                                    setAttentionSourceSort(
+                                      event.target.value as AttentionSourceSort,
+                                    )
+                                  }
+                                  value={attentionSourceSort}
+                                >
+                                  <option value="weight">By weight</option>
+                                  <option value="position">By position</option>
+                                </select>
+                              </label>
+                            ) : null}
+                            <button
+                              className="explorer-button explorer-button--ghost"
+                              onClick={() => {
+                                void handleCopyAttentionJson();
+                              }}
+                              type="button"
+                            >
+                              {attentionCopyState === "copied"
+                                ? "Copied JSON"
+                                : attentionCopyState === "error"
+                                  ? "Copy failed"
+                                  : "Copy analysis JSON"}
+                            </button>
                           </div>
                           <p className="attention-source-list__summary">
                             {`${attentionSourceEntries.length} ranked sources · ${visibleAttentionSourceCount} visible`}
@@ -7019,22 +7403,14 @@ function Workspace() {
                             <select
                               className="explorer-select"
                               disabled={attentionLoading}
-                              onChange={(event) => {
-                                const nextValue = event.target.value;
-                                if (nextValue === "all") {
-                                  setShowAllAttentionTokens(true);
-                                } else {
-                                  setShowAllAttentionTokens(false);
-                                  setAttentionTopN(Number(nextValue));
-                                }
-                              }}
-                              value={showAllAttentionTokens ? "all" : String(attentionTopN)}
+                              onChange={(event) => setAttentionTopN(Number(event.target.value))}
+                              value={String(attentionTopN)}
                             >
                               <option value="5">Top 5</option>
                               <option value="8">Top 8</option>
                               <option value="12">Top 12</option>
                               <option value="20">Top 20</option>
-                              {canShowAllAttentionTokens ? <option value="all">All analyzed</option> : null}
+                              <option value="32">Top 32</option>
                             </select>
                           </label>
                         </div>
@@ -7124,7 +7500,7 @@ function Workspace() {
                               <ChevronLeft className="h-4 w-4" />
                             </button>
                             <label className="attention-controls__label">
-                              <span>Head</span>
+                              <span>Head index</span>
                               <select
                                 className="explorer-select"
                                 disabled={attentionLoading || attentionHeadCount <= 0}
